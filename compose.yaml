@@ -1,6 +1,5 @@
 # One stack (ARCHITECTURE §8.2). Data lives in named volumes only; nothing is
 # published except the API (127.0.0.1:${API_PORT:-8080}, from M3). Dev extras: compose.dev.yaml.
-# ponytail: the `nitro` service (profile `node`) lands with M6, once its flags are verified.
 name: rhnode
 
 services:
@@ -60,5 +59,53 @@ services:
     depends_on:
       clickhouse: { condition: service_healthy }
 
+  # Our own Robinhood Chain full node (`docker compose --profile node up -d`). Flags verified against
+  # nitro-node v3.12.2 `--help` (2026-10-29); seed it with nitro/snapshot.sh first (otherwise it syncs from genesis
+  # for weeks). Memory: capped so the box's other services win (oom_score_adj kills Nitro first). Sized for a 16 GB
+  # box shared with ClickHouse; raise NITRO_MEM and the caches on a bigger one. No published ports.
+  nitro:
+    profiles: ["node"]
+    image: offchainlabs/nitro-node:v3.12.2-5f02f3f
+    restart: unless-stopped
+    stop_grace_period: 5m
+    mem_limit: ${NITRO_MEM:-8g}
+    memswap_limit: ${NITRO_MEM:-8g}
+    oom_score_adj: 500
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    environment:
+      GOMEMLIMIT: ${NITRO_GOMEMLIMIT:-5000MiB} # container limit − Pebble/fastcache (off-heap) − margin
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - nitro:/home/user/.arbitrum # the image runs as uid 1000 `user` (not /home/nitro as older docs say)
+      - ./nitro:/home/user/config:ro
+    command:
+      - --chain.info-files=/home/user/config/robinhood-chain-info.json
+      - --init.genesis-json-file=/home/user/config/robinhood-genesis.json
+      - --persistent.chain=/home/user/.arbitrum/robinhood
+      - --parent-chain.connection.url=${L1_RPC:-https://ethereum-rpc.publicnode.com}
+      - --parent-chain.blob-client.beacon-url=${L1_BEACON:-https://ethereum-beacon-api.publicnode.com}
+      - --node.feed.input.url=wss://feed.mainnet.chain.robinhood.com,wss://delayed-feed.mainnet.chain.robinhood.com
+      - --execution.forwarding-target=https://rpc.mainnet.chain.robinhood.com
+      - --node.staker.enable=false
+      - --execution.caching.state-scheme=path # must match the snapshot (full-path)
+      - --execution.caching.database-cache=${NITRO_DB_CACHE:-768}
+      - --execution.caching.trie-clean-cache=384
+      - --execution.caching.snapshot-cache=384
+      - --execution.caching.trie-dirty-cache=256
+      - --execution.caching.stylus-lru-cache-capacity=128
+      - --persistent.pebble.max-concurrent-compactions=3
+      - --node.resource-mgmt.mem-free-limit=768MiB # refuse heavy RPC instead of OOM
+      - --http.addr=0.0.0.0
+      - --http.port=8547
+      - --http.vhosts=*
+      - --http.api=net,web3,eth,arb,debug
+      - --ws.addr=0.0.0.0
+      - --ws.port=8548
+      - --ws.api=net,web3,eth
+      - --metrics
+      - --metrics-server.addr=0.0.0.0
+
 volumes:
   clickhouse:
+  nitro:
