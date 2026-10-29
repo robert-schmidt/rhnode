@@ -12,6 +12,7 @@ import { upstream, type Client } from "../chain/upstream.ts";
 import { decodeBlock, emptyRows, type RpcBlock, type RpcReceipt, type Rows } from "./decode.ts";
 import { learn, loadCtx, type KeepCtx } from "./keep.ts";
 import { findFork, rollback, storedHash } from "./reorg.ts";
+import { BLOCKS, connect } from "../bus.ts";
 
 const hex = (n: number) => "0x" + n.toString(16);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -52,7 +53,7 @@ export async function runBatch(up: Client, from: number, to: number, ctx: KeepCt
     time = Number(b.timestamp);
   }
   await Promise.all(Object.entries(all).map(([table, rs]) => insert(table, rs, `${from}-${to}:${hash}`)));
-  return { hash: hash!, time, counts: Object.fromEntries(Object.entries(all).map(([k, v]) => [k, v.length])) };
+  return { hash: hash!, time, blocks: fetched, counts: Object.fromEntries(Object.entries(all).map(([k, v]) => [k, v.length])) };
 }
 
 function reporter(up: Client) {
@@ -76,6 +77,7 @@ async function tip(up: Client) {
   let parent: string | null = cur?.hash ?? null;
   let ctx = await loadCtx(windowSec), ctxAt = Date.now();
   const report = reporter(up);
+  const bus = await connect();
   console.log(`[ingest] tip from ${next} (${cur ? "cursor" : "cold start"}), batch ${B}, ttl ${cfg.rawTtlDays}d, upstreams ${up.stats().map((s) => s.host).join(", ")}`);
   for (;;) {
     const end = next - (next % B) + B - 1;
@@ -98,6 +100,9 @@ async function tip(up: Client) {
       continue;
     }
     await setCursor(end, r.hash);
+    // The API's /ws fan-out: headers + logs, after they are stored (so a resume from ClickHouse never misses one).
+    bus?.publish(BLOCKS, JSON.stringify(r.blocks.map(([b, rc]) => ({ header: { ...b, transactions: undefined }, logs: rc.flatMap((x) => x.logs) }))))
+      .catch((e: Error) => console.warn(`[ingest] publish: ${e.message}`));
     report(end, head, r.time, r.counts);
     parent = r.hash;
     next = end + 1;

@@ -48,6 +48,21 @@ export const cfg = {
   startBlock: env.START_BLOCK ? Number(env.START_BLOCK) : null,
   /** LAUNCH keep bit: a new token's first N hours of activity are kept. */
   launchWindowHours: int(env.LAUNCH_WINDOW_HOURS, 24),
+  /** Pub/sub between ingest (publishes each batch's blocks + logs) and the API (WebSocket fan-out). Empty = off. */
+  redisUrl: env.REDIS_URL ?? "",
+  api: {
+    port: int(env.API_LISTEN_PORT, 8080),
+    /** `name:key,name:key`. Every route except /health needs one (header x-api-key, ?apikey=, or /rpc/<key>, /ws/<key>). */
+    keys: new Map((env.API_KEYS ?? "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => { const i = x.indexOf(":"); return [x.slice(i + 1), x.slice(0, i)] as [string, string]; })),
+    /** Requests per second per key (token bucket, 2 s burst). WebSocket notifications don't count. */
+    rps: int(env.API_RPS, 200),
+    /** Immutable JSON-RPC results (receipts, txs, old blocks) kept in memory. */
+    cacheMb: int(env.API_CACHE_MB, 128),
+    /** eth_sendRawTransaction goes here only, once (never retried across endpoints). */
+    sendHttp: parseUpstreams(env.SEND_HTTP ?? "https://rpc.mainnet.chain.robinhood.com|20"),
+    /** Optional: Blockscout PRO key. When set, /api questions we can't answer exactly are proxied there. */
+    blockscoutKey: env.BLOCKSCOUT_API_KEY ?? "",
+  },
   clickhouse: {
     url: env.CLICKHOUSE_URL ?? "http://127.0.0.1:8123",
     username: env.CLICKHOUSE_USER ?? "rhnode",

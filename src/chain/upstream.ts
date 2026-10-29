@@ -72,9 +72,39 @@ export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?
     throw last;
   }
 
+  /** Proxy one JSON-RPC call as-is: the first endpoint that answers with a JSON-RPC response wins, errors included
+   *  (a revert or "not found" is an answer). Only transport failures and rate/range limits move on to the next endpoint. */
+  async function forward(method: string, params: unknown[]): Promise<RpcReply> {
+    let last: unknown;
+    for (let a = 0; a < Math.min(attempts, eps.length * 2); a++) {
+      const e = await take();
+      try {
+        const res = await fetch(e.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
+        });
+        if (!res.ok) throw new RpcError(e.host, `HTTP ${res.status}`, res.status);
+        const j = (await res.json()) as RpcReply;
+        if (j.error && LIMITED.test(j.error.message ?? "")) throw new RpcError(e.host, `${method}: ${j.error.message}`, j.error.code);
+        e.ok++;
+        e.fails = 0;
+        return j.error ? { error: j.error } : { result: j.result ?? null };
+      } catch (err) {
+        e.err++;
+        e.fails++;
+        e.downUntil = Date.now() + Math.min(60_000, 250 * 2 ** e.fails);
+        last = err;
+      }
+    }
+    throw last;
+  }
+
   let headSeen = 0;
   return {
     call,
+    forward,
     /** Highest head any endpoint reported (they lag each other by a few blocks). */
     async head(): Promise<number> {
       headSeen = Math.max(headSeen, Number(await call<string>("eth_blockNumber", [])));
@@ -84,3 +114,6 @@ export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?
   };
 }
 export type Client = ReturnType<typeof upstream>;
+export type RpcReply = { result?: unknown; error?: { code: number; message: string; data?: unknown } };
+/** Endpoint-side limits (rate, block range, result count, overload): another endpoint may well answer. */
+const LIMITED = /rate|limit|too many|exceed|capacity|busy|timeout|range|try again/i;

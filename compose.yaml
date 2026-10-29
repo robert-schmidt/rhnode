@@ -33,6 +33,7 @@ services:
     env_file: .env
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
+      REDIS_URL: redis://redis:6379
     depends_on:
       clickhouse: { condition: service_healthy }
 
@@ -43,6 +44,19 @@ services:
     env_file: .env
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on:
+      clickhouse: { condition: service_healthy }
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/api/main.ts"]
+    env_file: .env
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
     depends_on:
       clickhouse: { condition: service_healthy }
 
