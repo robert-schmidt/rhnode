@@ -1,6 +1,6 @@
 // JSON-RPC (ARCHITECTURE §6): Ethereum methods proxied to the upstreams (our node in `full`), with immutable
 // results cached, eth_getLogs answered from ClickHouse when the range is inside what we hold (no range or
-// topic caps), and the Alchemy extras hoodini-style apps call. Same handler for /rpc and /ws.
+// topic caps), and the Alchemy extras apps commonly call. Same handler for /rpc and /ws.
 import { decodeFunctionResult, encodeFunctionData, parseAbi } from "viem";
 import { cfg } from "../config.ts";
 import { rows } from "../ch.ts";

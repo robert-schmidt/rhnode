@@ -15,7 +15,9 @@ echo "$parts" | while read -r f size xx; do
   [ -e "$f.ok" ] && continue
   echo "$(date -u +%T) downloading $f ($size bytes)"
   until [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" = "$size" ]; do
-    curl -fsS --retry 50 --retry-all-errors --retry-delay 10 -C - -o "$f" "$BASE/$ID/$f" || sleep 30
+    # No curl --retry: it re-sends the offset it started with, so a dropped stream restarted a 537 GB part from 0
+    # (seen 2026-10-29). This loop resumes from the file's real size instead. HTTP/1.1: the CDN's HTTP/2 streams reset.
+    curl -fsS --http1.1 --speed-limit 1048576 --speed-time 120 -C - -o "$f" "$BASE/$ID/$f" || sleep 10
   done
   echo "$(date -u +%T) verifying $f"
   [ "$(xxhsum -H1 "$f" | cut -d' ' -f1)" = "$xx" ] || { echo "xxhash mismatch: $f (deleted, re-run)"; rm -f "$f"; exit 1; }
