@@ -246,6 +246,15 @@ A bot's shortlist, held tokens, tracked pools and own wallets become watchlists.
 - **Rows past the TTL are dropped at insert, but the kept MV still fires.** That is §4's "older than 14 days → kept only" for free.
 - **Relay v3.2 router is `0x0729e2a4716d9f7dd17858d5d504426d228697f7`** (found in our own raw_txs). It also routes smart-wallet
   sells, so `fillOf` gained a guard (src/chain/relay.ts). The proxy `0xa834e703…` hasn't appeared yet.
+- **Inserts are synchronous (`async_insert = 0`).** ClickHouse 26.x turns async inserts on by default; on that path a replayed
+  batch whose token drops every row crashes (`Invalid partition key size: 0`), and one batch was stored twice. We batch ourselves.
+- **A replay can add `kept_*` rows, never duplicates.** ClickHouse runs the kept MVs even when the source insert is deduplicated,
+  so a re-run whose keep context differs (e.g. a launch window learned differently) promotes extra rows. Same keys collapse in the
+  ReplacingMergeTree; raw/ev stay untouched.
+- **M1 acceptance (2026-10-29, Mac, 21:25–22:26 UTC):** 36,480 blocks (101209730–101246199), 15/15 random blocks match the official
+  RPC tx- and log-for-log, no gaps; one duplicated batch from the async-insert era (fixed above); a 1,000-block re-run after the
+  fix added 0 raw/ev rows. Disk: 7.2 GiB/day for every table (raw_txs 34%, raw_logs 27%). Upstreams: ~20 req/s of ~40;
+  the official RPC errors ~9% (head lag), absorbed by the rotation. RAM: ClickHouse 1.2–2.4 GB, ingest ~130 MB, projector ~110 MB.
 - **Not built in M1:** `INGEST_SCOPE=watched` and `TRACES=tip` (ingest refuses to start with them), reorg rollback (a parent
   mismatch halts ingest; M2), `ev_locks`/`ev_liquidity`/`ev_trades` (M2), Pons fee-vault matching for `LOCKS`.
 

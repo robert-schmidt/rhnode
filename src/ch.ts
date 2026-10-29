@@ -11,7 +11,9 @@ export async function insert(table: string, values: object[], token: string): Pr
     table,
     values,
     format: "JSONEachRow",
-    clickhouse_settings: { insert_deduplication_token: `${table}:${token}`, deduplicate_blocks_in_dependent_materialized_views: 1 },
+    // async_insert is on by default since ClickHouse 26.x; its path crashes when the token drops every row
+    // ("Invalid partition key size: 0", seen 2026-10-29 on a replayed batch). We batch ourselves, so insert synchronously.
+    clickhouse_settings: { async_insert: 0, insert_deduplication_token: `${table}:${token}`, deduplicate_blocks_in_dependent_materialized_views: 1 },
   });
 }
 
