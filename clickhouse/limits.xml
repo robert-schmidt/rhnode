@@ -1,0 +1,7 @@
+<!-- Mac sizing (ARCHITECTURE §8.3): ClickHouse stays under ~4 GB so Nitro gets the rest. -->
+<clickhouse>
+    <max_server_memory_usage>4000000000</max_server_memory_usage>
+    <mark_cache_size>268435456</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+    <logger><level>warning</level></logger>
+</clickhouse>

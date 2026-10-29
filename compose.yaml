@@ -1,0 +1,50 @@
+# One stack (ARCHITECTURE §8.2). Data lives in named volumes only; nothing is
+# published except the API (127.0.0.1:${API_PORT:-8080}, from M3). Dev extras: compose.dev.yaml.
+# ponytail: the `nitro` service (profile `node`) lands with M6, once its flags are verified.
+name: rhnode
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-rhnode}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-rhnode}
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+      - ./clickhouse/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+
+  ingest:
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/ingest/main.ts"]
+    env_file: .env
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on:
+      clickhouse: { condition: service_healthy }
+
+  projector:
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/projector/main.ts"]
+    env_file: .env
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on:
+      clickhouse: { condition: service_healthy }
+
+volumes:
+  clickhouse:
