@@ -14,7 +14,7 @@ No API keys, no paid providers. One `docker compose` stack.
 | M0 scaffold: compose (ClickHouse + Redis), config profiles, migrations | ✅ |
 | M1 tip ingest of every block → `raw_*` + decoded `ev_*` (transfers, swaps, pools, launches, Relay fills), keep bits, reorg rollback | ✅ |
 | M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices + 1m candles, wallet trades | in progress |
-| M3 `/rpc` + `/ws` proxy, Etherscan/Blockscout-compatible `/api` | planned |
+| M3 API: `/rpc`, `/ws`, Blockscout-compatible `/api`, API keys | ✅ |
 | M4 `/v1/stream` with resume, watchlists | planned |
 | M5 `/v1` insights REST | planned |
 | M6 own Nitro node (`--profile node`) | planned |
@@ -43,6 +43,29 @@ docker compose exec clickhouse clickhouse-client -u rhnode --password "$(grep ^C
 ```
 
 Stop with `docker compose stop`. `docker compose down -v` deletes the data.
+
+## API
+
+Every route except `GET /health` needs a key from `API_KEYS`: header `x-api-key: KEY`, query `?apikey=KEY`
+(Etherscan style), or as the last path segment `/rpc/KEY`, `/ws/KEY` (Alchemy style, for clients that only take a URL).
+Each key gets `API_RPS` requests/s (default 200; WebSocket notifications don't count).
+
+| Route | What |
+|---|---|
+| `POST /rpc` | Ethereum JSON-RPC 2.0, batches included. Proxied to the upstreams (your node in `full`); receipts, txs and old blocks cached. `eth_getLogs` inside the indexed window is answered from ClickHouse with **no range or topic caps**. `alchemy_getTokenBalances` (exact, via Multicall3). `eth_sendRawTransaction` goes to the official sequencer RPC only, never retried elsewhere |
+| `wss /ws` | the same JSON-RPC plus `eth_subscribe` `newHeads` and `logs` (any address/topic sets, no caps), fed by ingest (~2 s behind the block timestamp) |
+| `GET /api?module=…&action=…` | Etherscan/Blockscout v1: `token.getTokenHolders`, `account.tokentx`, `account.txlist`, `account.balance(multi)`, `logs.getLogs`, `block.eth_block_number` |
+| `GET /api/v2/tokens/{address}` | Blockscout v2 token card (name, symbol, decimals, total supply, holder count) |
+| `GET /health` | `{ok, ingested, rawFrom}`: the indexed block window |
+
+Answers are exact or refused, never partial: a window that starts before the indexed data, or holders of a token
+minted before indexing began, return **HTTP 503** (clients treat it as "unknown"), or are proxied to Blockscout when
+`BLOCKSCOUT_API_KEY` is set.
+
+```sh
+curl -s -X POST https://your.host/rpc/$KEY -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber"}'
+curl -s "https://your.host/api?module=token&action=getTokenHolders&contractaddress=0x…&page=1&offset=50&apikey=$KEY"
+```
 
 ### Linux
 
