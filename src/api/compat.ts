@@ -135,9 +135,9 @@ export async function v2(path: string, q: URLSearchParams): Promise<Reply> {
     "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token = {t:String}",
     { t: m[1].toLowerCase() });
   if (!t) return fallback(path, q, "token not seen since rhnode started indexing");
-  if (!t.complete && cfg.api.blockscoutKey) return fallback(path, q, "holder count not exact");
+  if (!t.complete) return fallback(path, q, "holder count is exact only for tokens minted since rhnode started indexing");
   return { status: 200, body: {
     address: t.token, address_hash: t.token, name: t.name, symbol: t.symbol, decimals: t.decimals < 0 ? null : String(t.decimals), total_supply: t.supply,
-    holders_count: t.complete ? t.holders : null, holders: t.complete ? t.holders : null, type: "ERC-20", exchange_rate: null,
+    holders_count: t.holders, holders: t.holders, type: "ERC-20", exchange_rate: null,
   } };
 }
