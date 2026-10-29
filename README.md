@@ -23,8 +23,10 @@ Design and reasoning: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Run it
 
-Needs Docker with Compose v2 (Linux or macOS). About 3 GB RAM and ~7.5 GB of disk per day of raw history
-(measured 2026-10-29 with every block indexed; see `RAW_TTL_DAYS`).
+Needs Docker with Compose v2. The images are multi-arch (amd64 and arm64), so the same commands work on Linux and macOS.
+Indexing every block uses about 3 GB of RAM and ~7.5 GB of disk per day of raw history (measured 2026-10-29;
+see `RAW_TTL_DAYS`), and needs only a fraction of one CPU core (~10 blocks/s at the tip; decoding runs at >5,000 blocks/s
+on a 2014 Xeon).
 
 ```sh
 git clone https://github.com/robert-schmidt/rhnode && cd rhnode
@@ -41,6 +43,32 @@ docker compose exec clickhouse clickhouse-client -u rhnode --password "$(grep ^C
 ```
 
 Stop with `docker compose stop`. `docker compose down -v` deletes the data.
+
+### Linux
+
+- Docker Engine: `curl -fsSL https://get.docker.com | sh` (or your distro's `docker-ce` packages), then run the commands
+  above with `sudo` or add yourself to the `docker` group.
+- Keep the data on a dedicated disk so the system disk can't fill. Docker ≥ 29 stores images in containerd and volumes
+  in Docker's own root, so move both:
+  ```sh
+  # /etc/docker/daemon.json
+  { "data-root": "/mnt/data/docker", "log-driver": "json-file", "log-opts": { "max-size": "20m", "max-file": "3" } }
+  # /etc/containerd/config.toml, first line
+  root = "/mnt/data/containerd"
+  ```
+  and add `RequiresMountsFor=/mnt/data` to both services (`systemctl edit docker containerd`), so they wait for the disk.
+- USB disks: use a USB 3 port. `lsusb -t` should show `Driver=uas` at 5000M; on USB 2 (`usb-storage`, 480M) writes drop to
+  ~40 MB/s, which ClickHouse tolerates but a Nitro node doesn't.
+- The API (from M3) listens on `127.0.0.1:${API_PORT}` only. Put nginx or Caddy in front of it; WebSocket paths need
+  `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"`.
+
+### macOS
+
+- Docker Desktop or OrbStack. Give the VM at least 6 GB of memory and enough disk (Settings → Resources); on Docker
+  Desktop, move the disk image to an external drive there if the internal one is small. Keep the data in named volumes
+  (the default here): bind mounts go through virtiofs and are much slower for a database.
+- "Clean / Purge data" in Docker Desktop deletes the VM disk, i.e. all indexed data.
+- While the Mac sleeps, ingest pauses; on wake it catches up from its cursor.
 
 ## Develop
 

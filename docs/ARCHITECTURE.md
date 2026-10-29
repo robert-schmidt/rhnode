@@ -362,7 +362,7 @@ One `compose.yaml` runs everything; `docker compose --profile node up -d` adds N
 it is `lite`. Data lives in named volumes only, and nothing is published except the API on loopback (`API_PORT`, default
 8080), so a reverse proxy (nginx, Caddy) or an SSH tunnel decides who reaches it.
 
-- **Linux (recommended):** put Docker's `data-root` on a dedicated disk (`/etc/docker/daemon.json`), so the system disk can't fill.
+- **Linux (recommended):** put Docker's `data-root` and containerd's `root` (Docker ≥ 29 keeps images there) on a dedicated disk, so the system disk can't fill (README → Linux).
   The `lite` profile with every block at the tip used ~2.5 GB RAM in total (ClickHouse capped at 4 GB, `clickhouse/limits.xml`).
 - **macOS (dev):** Docker Desktop or OrbStack. Put the VM disk on a fast drive and keep data in named volumes (bind mounts
   go through virtiofs, which is far slower for a database). Docker Desktop "Purge data" deletes the VM disk, i.e. the data.
