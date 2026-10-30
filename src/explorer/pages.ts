@@ -241,7 +241,9 @@ async function walletTxs(rpc: Rpc, a: string, before: number): Promise<WTx[]> {
   const have = new Map((await rows<WTx>(
     `SELECT ${TX_COLS} FROM raw_txs WHERE block IN {b:Array(UInt64)} AND sign = 1
      UNION ALL SELECT ${TX_COLS} FROM kept_txs FINAL WHERE block IN {b:Array(UInt64)} AND sign = 1`, { b })).map((t) => [`${t.block}:${t.tx_index}`, t]));
-  return Promise.all(ptrs.map(async (p) => have.get(`${p.block}:${p.tx_index}`) ?? nodeTx(rpc, Number(p.block), p.tx_index)));
+  // a pointer left by a reorged block can point at another tx: show only txs that involve the wallet
+  return (await Promise.all(ptrs.map(async (p) => have.get(`${p.block}:${p.tx_index}`) ?? nodeTx(rpc, Number(p.block), p.tx_index))))
+    .filter((t) => t.from === a || t.to === a || t.created === a);
 }
 async function nodeTx(rpc: Rpc, n: number, i: number): Promise<WTx> {
   const [t, blk] = await Promise.all([
