@@ -18,7 +18,11 @@ git fetch -q origin
 PREV=$(git rev-parse HEAD); NEXT=$(git rev-parse "$REF")
 if [ "${DEPLOY_SKIP_CI:-0}" != 1 ]; then
   repo=$(git remote get-url origin | sed -E 's#.*github.com[:/](.*)\.git$#\1#; s#.*github.com[:/](.*)$#\1#')
-  ci=$(curl -fsS "https://api.github.com/repos/$repo/commits/$NEXT/check-runs" | python3 -c 'import json,sys;r=json.load(sys.stdin)["check_runs"];print("ok" if r and all(c["conclusion"]=="success" for c in r) else "|".join(f"{c[\"name\"]}={c[\"conclusion\"] or c[\"status\"]}" for c in r) or "none")')
+  ci=$(curl -fsS "https://api.github.com/repos/$repo/commits/$NEXT/check-runs" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["check_runs"]
+bad = [c["name"] + "=" + str(c["conclusion"] or c["status"]) for c in r if c["conclusion"] != "success"]
+print("none" if not r else "|".join(bad) or "ok")')
   [ "$ci" = ok ] || { log "CI not green for ${NEXT%"${NEXT#???????}"}: $ci (DEPLOY_SKIP_CI=1 to override)"; exit 1; }
 fi
 
