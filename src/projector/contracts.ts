@@ -49,15 +49,16 @@ export async function deriveContracts(up: Client, from: number, to: number): Pro
   seen ??= new Set((await rows<{ f: string }>("SELECT DISTINCT fingerprint AS f FROM contracts WHERE fingerprint != ''")).map((r) => r.f));
   const t = await span(from, to);
   const fresh = await rows<{ address: string; block: string; time: number; tx_hash: string; deployer: string; created: number }>(
-    `SELECT address, min(block) AS block, toUnixTimestamp(min(time)) AS time, argMin(tx_hash, block) AS tx_hash,
-       argMax(deployer, created) AS deployer, max(created) AS created
-     FROM (SELECT created AS address, block, time, hash AS tx_hash, \`from\` AS deployer, 1 AS created FROM raw_txs
+    `SELECT address, b AS block, t AS time, h AS tx_hash, d AS deployer, c AS created FROM (
+     SELECT address, min(block) AS b, toUnixTimestamp(min(time)) AS t, argMin(tx_hash, block) AS h,
+       argMax(deployer, by_tx) AS d, max(by_tx) AS c
+     FROM (SELECT created AS address, block, time, hash AS tx_hash, \`from\` AS deployer, 1 AS by_tx FROM raw_txs
            WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND created != '' AND status = 1
            UNION ALL
-           SELECT address, block, time, tx_hash, '' AS deployer, 0 AS created FROM raw_logs
+           SELECT address, block, time, tx_hash, '' AS deployer, 0 AS by_tx FROM raw_logs
            WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})
      WHERE address NOT IN (SELECT address FROM contracts)
-     GROUP BY address`, { from, to, ...t });
+     GROUP BY address)`, { from, to, ...t });
   if (!fresh.length) return 0;
   const tip = "0x" + to.toString(16);
   const out = await Promise.all(fresh.map(async (c) => {
