@@ -83,6 +83,8 @@ reads this stack's ClickHouse, Redis (the live block stream) and node. On one bo
 network. On a second box (e.g. a public edge server on the same LAN), set `NODE_BIND=0.0.0.0` and `API_HOST=<its IP>`
 here: ClickHouse `:8123`, Redis `:6379` and Nitro `:8547`/`:8548` are then published, and `ops/firewall.sh` (run at boot by
 `ops/rhnode-firewall.service`) admits only `API_HOST` to them on the LAN interface.
+`ops/harden.sh` locks the box down around that: SSH keys only for one user, root locked, ufw letting in only SSH from
+the LAN, fail2ban, and the firewall unit installed.
 
 Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_blocks` from go-live), and the history floor
 (`ctl_cursors` `walk`, or go-live before the walk starts) say what can be answered exactly; anything older is "unknown".
