@@ -7,6 +7,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { cfg } from "../config.ts";
 import { BLOCKS, connect } from "../bus.ts";
 import { handle } from "./rpc.ts";
+import type { RpcReply } from "../chain/upstream.ts";
 import { v1, v2 } from "./compat.ts";
 import { coverage } from "./coverage.ts";
 import { matcher, type Sub } from "./subs.ts";
@@ -58,12 +59,34 @@ async function body(req: http.IncomingMessage): Promise<string> {
   return s;
 }
 
+// /health (no key): whether clients should use rhnode right now, and for what. 503 when not ok, so a plain
+// status check is enough; the fields let a client decide per subsystem (e.g. every eth_call only when node = "nitro").
+const NODE = cfg.upstreamHttp.some((u) => /\/\/nitro[:/]/.test(u.url)) ? "nitro" : "public";
+const MAX_LAG_BLOCKS = 600; // ~1 min at ~104 ms blocks
+const MAX_STREAM_AGE_S = 30;
+let lastBlockAt = 0;
+async function health() {
+  const c = await coverage();
+  const head: RpcReply = await handle("eth_blockNumber").catch((e: Error) => ({ error: { code: -1, message: e.message } }));
+  const headN = head.error ? null : Number(head.result);
+  const lag = headN == null ? null : Math.max(0, headN - c.ingested);
+  const streamAgeS = lastBlockAt ? Math.round((Date.now() - lastBlockAt) / 1000) : null;
+  const upstream = !head.error, index = lag != null && lag <= MAX_LAG_BLOCKS, stream = streamAgeS != null && streamAgeS <= MAX_STREAM_AGE_S;
+  return {
+    ok: upstream && index && stream,
+    node: NODE, // "nitro": our own node answers /rpc; "public": /rpc proxies the free endpoints (rate-shared)
+    upstream, index, stream,
+    head: headN, ingested: c.ingested, lagBlocks: lag, streamAgeS,
+    rawFrom: Number.isFinite(c.rawFrom) ? c.rawFrom : null,
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
   try {
     if (url.pathname === "/health") {
-      const c = await coverage();
-      return send(res, 200, { ok: true, ingested: c.ingested, rawFrom: c.rawFrom });
+      const h = await health();
+      return send(res, h.ok ? 200 : 503, h);
     }
     if (req.method === "OPTIONS") {
       res.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type, x-api-key", "access-control-allow-methods": "GET, POST" });
@@ -135,6 +158,7 @@ if (bus) {
   sub.on("error", (e: Error) => console.warn(`[redis] ${e.message}`));
   await sub.connect();
   await sub.subscribe(BLOCKS, (msg: string) => {
+    lastBlockAt = Date.now();
     if (!conns.size) return;
     const blocks = JSON.parse(msg) as { header: Record<string, unknown>; logs: Record<string, unknown>[] }[];
     for (const [ws, c] of conns) for (const [id, s] of c.subs) {
