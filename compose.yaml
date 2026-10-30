@@ -110,6 +110,8 @@ services:
       # already holds. --execution.rpc.log-no-history turns it off; --execution.rpc.log-history=0 indexes the whole chain.
       - ${NITRO_LOG_INDEX:---execution.rpc.log-history=9400000}
       - --execution.caching.trie-dirty-cache=256
+      # The block prefetcher (default on) uses other cores; on a power-capped box they take clock from the serial executor.
+      - --execution.enable-prefetch-block=${NITRO_PREFETCH:-true}
       - --execution.caching.stylus-lru-cache-capacity=128
       - --persistent.pebble.max-concurrent-compactions=3
       - --node.resource-mgmt.mem-free-limit=768M # refuse heavy RPC instead of OOM
