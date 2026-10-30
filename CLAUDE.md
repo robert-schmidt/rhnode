@@ -17,7 +17,9 @@ that read the chain, and gives more insight than either.
 - One docker compose stack (`--profile node` adds Nitro), named volumes (no bind mounts for data), nothing published except
   the API on `127.0.0.1:${API_PORT}`; a reverse proxy in front decides who reaches it.
 - **Data from go-live forward only.** No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
-  of a pool that trades now). Tokens older than go-live never get exact holders (`serve_tokens.complete = 0`).
+  of a pool that trades now) and **token promotion** (changed 2026-10-30, so apps can drop Blockscout): a token older than
+  go-live is queued the first time the API refuses it, and src/promoter fetches its pre-go-live Transfer history once into
+  kept_transfers + agg_balances (complete only if minted = totalSupply). Wallets stay go-live-forward only.
 
 ## Rules
 - Free/keyless first, and measure the cost of anything that could bill.

@@ -1,7 +1,7 @@
 # rhnode
 
-A self-hosted **Robinhood Chain** (chain id 4663) indexer and data API, with an optional own Nitro node later.
-It follows the chain tip from free public RPC endpoints, decodes everything into ClickHouse, and derives the
+A self-hosted **Robinhood Chain** (chain id 4663) indexer and data API, optionally with its own Nitro node.
+It follows the chain tip (from free public RPC endpoints, or your node), decodes everything into ClickHouse, and derives the
 facts trading apps usually buy from Alchemy or Blockscout: exact token balances and holders, pools, a price for
 every swap, 1-minute candles, and per-wallet trades with PnL inputs.
 
@@ -14,10 +14,11 @@ No API keys, no paid providers. One `docker compose` stack.
 | M0 scaffold: compose (ClickHouse + Redis), config profiles, migrations | ✅ |
 | M1 tip ingest of every block → `raw_*` + decoded `ev_*` (transfers, swaps, pools, launches, Relay fills), keep bits, reorg rollback | ✅ |
 | M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices + 1m candles, wallet trades | in progress |
+| Token promotion: a token older than go-live gets its whole history once, on first request (`src/promoter`) | ✅ |
 | M3 API: `/rpc`, `/ws`, Blockscout-compatible `/api`, API keys | ✅ |
 | M4 `/v1/stream` with resume, watchlists | planned |
 | M5 `/v1` insights REST | planned |
-| M6 own Nitro node (`--profile node`) | planned |
+| M6 own Nitro node (`--profile node`), snapshot seeding, L1 proxy, self-heal + CI-gated deploys | syncing |
 
 Design and reasoning: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -43,6 +44,36 @@ docker compose exec clickhouse clickhouse-client -u rhnode --password "$(grep ^C
 ```
 
 Stop with `docker compose stop`. `docker compose down -v` deletes the data.
+
+Data starts at the block you start indexing ("go-live"); there is no genesis backfill. A token minted before then is
+**promoted** the first time someone asks for its holders or transfers: rhnode fetches that token's earlier Transfer history
+once (a few address-filtered `eth_getLogs` calls, usually under a minute), keeps it forever, and answers exactly from then on.
+Tokens with more than `PROMOTE_MAX_TRANSFERS` (500,000) earlier transfers stay refused.
+
+## Run your own Nitro node (optional)
+
+Without a node, `/rpc` proxies free public endpoints (rate-limited, shared with ingest). With one, the reads are local
+and unlimited. It's the official `offchainlabs/nitro-node` image, already defined in `compose.yaml` under the `node` profile.
+
+**Needs:** ~1.2 TB of fast disk to start (the snapshot unpacks to ~1.03 TB and grows), at least 16 GB RAM for the whole
+stack (Nitro is capped by `NITRO_MEM`, default 8g), and an L1 Ethereum RPC that serves `eth_getLogs` older than ~128
+blocks. Keyless `https://eth.drpc.org` works (the default); a free PublicNode token from allnodes.com works too. The
+beacon API for blobs defaults to PublicNode's keyless one. Measured 2026-10-30 on a 4-core Xeon E3 with a USB 3 NVMe:
+the node replays ~75–80 blocks/s, against ~9.6 produced, so it catches up ~5 days in ~17 h.
+
+```sh
+# 1. Seed it from the official snapshot (resumable, verifies each part, ~1 TB download; the parts are deleted after).
+VOL=$(docker volume inspect rhnode_nitro -f '{{.Mountpoint}}' 2>/dev/null || (docker volume create rhnode_nitro >/dev/null && docker volume inspect rhnode_nitro -f '{{.Mountpoint}}'))
+sudo sh nitro/snapshot.sh "$VOL/robinhood" /path/with/1.1TB/free
+# 2. Turn the profile on and start it (it reads L1 through l1proxy, so a keyed URL never reaches Nitro's logs).
+echo COMPOSE_PROFILES=node >> .env      # optional: L1_HTTP=url|rps,…  NITRO_MEM=12g  NITRO_DB_CACHE=2048
+docker compose up -d
+curl -s localhost:8080/health           # nitroBehind counts down to 0
+# 3. Once synced, send /rpc and ingest to it, with the public endpoints as fallback:
+#    UPSTREAM_HTTP=http://nitro:8547|500,https://rpc.mainnet.chain.robinhood.com|10
+```
+
+On macOS, Docker Desktop's VM needs the memory for it (Settings → Resources) and its disk image on a drive with room.
 
 ## API
 
@@ -131,8 +162,23 @@ node --env-file=.env src/tools/check-balances.ts   # compare indexed balances wi
 src/chain/      decoders (launchpads, v2/v3/v4 swaps, Relay fills), constants, the rotating upstream client
 src/ingest/     tip follower + backfill, keep rules, reorg rollback
 src/projector/  pools, balances/holders, prices + candles, trades
+src/promoter/   on-demand history of tokens older than go-live
+src/api/        /rpc, /ws, Blockscout-compatible /api, /v1, /health
+src/l1proxy.ts  Nitro's L1 reads, with failover and no keyed URL in Nitro's logs
+nitro/          the chain's official config files, snapshot.sh
+ops/            deploy.sh (CI-gated releases), heal.sh + systemd timer (self-healing)
 migrations/     ClickHouse schema (applied in order on start)
 ```
+
+What the stack runs (all pinned in `compose.yaml` / `package.json`):
+
+| Piece | Version | Role |
+|---|---|---|
+| ClickHouse | `clickhouse/clickhouse-server:26.3` | the store |
+| Redis | `redis:7.4-alpine` | block fan-out to `/ws` |
+| Node.js | `node:26-slim` (runs `.ts` directly) | ingest, projector, promoter, api, l1proxy |
+| Nitro (profile `node`) | `offchainlabs/nitro-node:v3.12.2-5f02f3f` | own Robinhood Chain node |
+| npm | `@clickhouse/client`, `viem`, `redis`, `ws` | |
 
 ## License
 

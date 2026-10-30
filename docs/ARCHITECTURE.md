@@ -229,6 +229,14 @@ A bot's shortlist, held tokens, tracked pools and own wallets become watchlists.
 - **Scope decision (2026-10-29): data from go-live forward only.** This supersedes the genesis backfill above,
   promotion "older than 14 days from the node" (§3.1 step 2) and M6's full backfill. Promotion stays as step 1 (≤ 14 days
   from ClickHouse). The one look into the past is a pool's identity when it first trades after go-live (§4.2).
+- **Token promotion (2026-10-30), so apps can drop Blockscout.** A token older than go-live is queued (`ctl_promotions`) the
+  first time the API refuses its holders, token card or tokentx. `src/promoter` then fetches its Transfer logs for
+  [0, go-live) once: one address-filtered `eth_getLogs`, bisected only when a provider refuses the range (Tenderly's keyless
+  gateway, then the official RPC; the node once synced). Rows go straight to `kept_transfers` and `agg_balances`, summed
+  per holder first. That avoids ev_transfers' daily partitions, which would make hundreds of parts. The window already
+  held is copied into `kept_transfers`, the token is watched, and it is re-projected; `complete` is set only if minted =
+  `totalSupply()`. Measured: 3K–27K transfers in 1–19 calls and ~22 s (20 s of it waiting for ingest's watchlist reload).
+  Holder counts matched Blockscout exactly. Over 500K transfers stays refused. Wallets stay go-live-forward only.
 
 - **Head: polled, not subscribed.** `eth_blockNumber` every 400 ms when caught up (src/ingest/main.ts). No silent-subscription
   failure mode (PublicNode), and it costs ~2.5 req/s. Switch to WS `newHeads` when `/v1/stream`'s < 300 ms target (M4) needs it.
