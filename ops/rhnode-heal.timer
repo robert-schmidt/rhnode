@@ -1,0 +1,9 @@
+[Unit]
+Description=rhnode self-heal every 2 minutes, starting 1 minute after boot
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

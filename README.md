@@ -93,6 +93,24 @@ curl -s "https://your.host/api?module=token&action=getTokenHolders&contractaddre
 - "Clean / Purge data" in Docker Desktop deletes the VM disk, i.e. all indexed data.
 - While the Mac sleeps, ingest pauses; on wake it catches up from its cursor.
 
+## Releases and restarts (a server)
+
+- **Release:** `ops/deploy.sh` (on the server, in the repo). It deploys `origin/main` only when its GitHub CI checks are green.
+  It rebuilds the app image and recreates only the app services (`ingest`, `projector`, `api`, `l1proxy`), then waits for
+  `/health` to show the index and stream fresh. If they don't come back within 3 minutes, it rolls back to the previous commit.
+  ClickHouse, Redis and Nitro are never restarted by a release: when their definition changed, it says so, and
+  `ops/deploy.sh --infra` applies it. An API or WebSocket change never touches the node.
+- **Restarts:** every service has `restart: unless-stopped`, and Docker waits for the data disk (`RequiresMountsFor`). On
+  top of that, `ops/rhnode-heal.timer` runs `ops/heal.sh` every 2 minutes: it mounts `DATA_MOUNT` if the disk came up
+  late, starts Docker, and runs `docker compose up -d` when a service isn't running. Running containers are never
+  restarted. To stop the stack on purpose, stop the timer first. Install it (the units assume `/srv/rhnode`):
+  ```sh
+  sudo cp ops/rhnode-heal.service ops/rhnode-heal.timer /etc/systemd/system/
+  sudo systemctl daemon-reload && sudo systemctl enable --now rhnode-heal.timer
+  ```
+- Nitro stops with a 5-minute grace period and resumes from its database. After an unclean stop it re-executes from its
+  last persisted state.
+
 ## Develop
 
 Node 26 runs the TypeScript directly (no build step).

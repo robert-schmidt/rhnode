@@ -63,11 +63,21 @@ services:
   # nitro-node v3.12.2 `--help` (2026-10-29); seed it with nitro/snapshot.sh first (otherwise it syncs from genesis
   # for weeks). Memory: capped so the box's other services win (oom_score_adj kills Nitro first). Sized for a 16 GB
   # box shared with ClickHouse; raise NITRO_MEM and the caches on a bigger one. No published ports.
+  # Nitro's L1 reads go through this (src/l1proxy.ts): keyed L1 URLs stay out of Nitro's logs, and providers fail over.
+  l1proxy:
+    profiles: ["node"]
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/l1proxy.ts"]
+    environment:
+      L1_HTTP: ${L1_HTTP:-https://eth.drpc.org|20} # url|rps,… first one up wins; dRPC is keyless and serves old logs (2026-10-30)
+
   nitro:
     profiles: ["node"]
     image: offchainlabs/nitro-node:v3.12.2-5f02f3f
     restart: unless-stopped
     stop_grace_period: 5m
+    depends_on: [l1proxy]
     mem_limit: ${NITRO_MEM:-8g}
     memswap_limit: ${NITRO_MEM:-8g}
     oom_score_adj: 500
@@ -83,14 +93,14 @@ services:
       - --chain.info-files=/home/user/config/robinhood-chain-info.json
       - --init.genesis-json-file=/home/user/config/robinhood-genesis.json
       - --persistent.chain=/home/user/.arbitrum/robinhood
-      - --parent-chain.connection.url=${L1_RPC:-https://eth.drpc.org} # keyless and serves old logs; PublicNode wants a token past ~128 blocks (2026-10-30)
+      - --parent-chain.connection.url=http://l1proxy:8545 # PublicNode's keyless RPC refuses logs older than ~128 blocks
       - --parent-chain.blob-client.beacon-url=${L1_BEACON:-https://ethereum-beacon-api.publicnode.com}
       - --node.feed.input.url=wss://feed.mainnet.chain.robinhood.com,wss://delayed-feed.mainnet.chain.robinhood.com
       - --execution.forwarding-target=https://rpc.mainnet.chain.robinhood.com
       - --node.staker.enable=false
       - --execution.caching.state-scheme=path # must match the snapshot (full-path)
       - --execution.caching.database-cache=${NITRO_DB_CACHE:-768}
-      - --execution.caching.trie-clean-cache=384
+      - --execution.caching.trie-clean-cache=${NITRO_TRIE_CACHE:-384}
       - --execution.caching.snapshot-cache=384
       - --execution.caching.trie-dirty-cache=256
       - --execution.caching.stylus-lru-cache-capacity=128

@@ -1,0 +1,7 @@
+[Unit]
+Description=rhnode: start whatever isn't running (mount, docker, compose services)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /srv/rhnode/ops/heal.sh

@@ -14,7 +14,8 @@ export class RpcError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?: number } = {}) {
+/** `ordered`: always the first endpoint that is up (failover), instead of spreading calls round-robin. */
+export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?: number; ordered?: boolean } = {}) {
   if (!list.length) throw new Error("no upstream endpoints");
   const eps: Ep[] = list.map(({ url, rps }) => ({ host: new URL(url).host, url, rps, tokens: rps, at: Date.now(), downUntil: 0, fails: 0, ok: 0, err: 0, nulls: 0 }));
   const attempts = opts.attempts ?? 30;
@@ -25,7 +26,7 @@ export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?
     for (;;) {
       const now = Date.now();
       for (let i = 0; i < eps.length; i++) {
-        const e = eps[(rr + i) % eps.length];
+        const e = eps[((opts.ordered ? 0 : rr) + i) % eps.length];
         e.tokens = Math.min(e.rps, e.tokens + ((now - e.at) / 1000) * e.rps);
         e.at = now;
         if (e.downUntil <= now && e.tokens >= 1) {

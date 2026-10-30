@@ -1,0 +1,20 @@
+# Typecheck + self-tests against a real ClickHouse. ops/deploy.sh refuses a commit whose checks aren't green.
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.3
+        env: { CLICKHOUSE_USER: rhnode, CLICKHOUSE_PASSWORD: ci, CLICKHOUSE_DB: rhnode }
+        ports: ["8123:8123"]
+        options: --health-cmd "wget -qO- http://127.0.0.1:8123/ping" --health-interval 3s --health-retries 30
+    env: { CLICKHOUSE_PASSWORD: ci }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 26, cache: npm }
+      - run: npm ci
+      - run: npm run check
+      - run: node src/api/subs.ts
