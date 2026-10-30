@@ -43,3 +43,7 @@ main form.row { display: flex; gap: 6px; max-width: 560px; } main form.inline { 
 table.stats-table th:first-child { color: var(--fg); font-weight: 500; } table.stats-table td, table.stats-table th:not(:first-child) { text-align: right; } table.stats-table td { font-variant-numeric: tabular-nums; }
 @media (max-width: 600px) { header form { max-width: none; flex-basis: 100%; } main { padding: 12px; } th, td { padding: 5px 7px; } dl { grid-template-columns: 1fr; } dt { margin-top: 6px; } }
 .stats b a { font-size: inherit; font-family: inherit; }
+.loading { display: flex; gap: .6em; align-items: center; padding: .7em 1em; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--muted); }
+.spin { flex: none; width: 1em; height: 1em; border: 2px solid var(--line); border-top-color: var(--acc); border-radius: 50%; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }

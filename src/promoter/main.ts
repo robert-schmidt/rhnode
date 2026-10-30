@@ -14,6 +14,7 @@ import { TRANSFER, topicAddr, word0 } from "../ingest/decode.ts";
 import { projectTokens } from "../projector/main.ts";
 import { walk, walkFloor } from "./walk.ts";
 import { walletWorker } from "./wallets.ts";
+import { scan } from "./scan.ts";
 
 /** Above this many transfers a token stays refused (WETH, USDG, stables): too big to hold for the gain. */
 const MAX_TRANSFERS = Number(process.env.PROMOTE_MAX_TRANSFERS ?? 500_000);
@@ -125,6 +126,7 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
 if (import.meta.main) {
   const B0 = await golive();
   console.log(`[promoter] go-live block ${B0}; max ${MAX_TRANSFERS} transfers a token, ${CONCURRENCY} at a time`);
+  if (process.env.SCAN === "1") void scan(B0); // every wallet's txs below go-live, once our node is synced
   void walletWorker(); // requested wallets (src/watch.ts) are indexed alongside the walk and token promotion
   // The walk holds every token's history above its floor, so promotions wait for it, and afterwards fetch only below it.
   if (process.env.WALK === "1") await walk(up, B0);

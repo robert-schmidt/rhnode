@@ -22,10 +22,12 @@ that read the chain, and gives more insight than either.
   newest first, at idle priority on the local node. It fills only what is kept forever (kept_transfers, agg_balances). The walk's
   floor (`exactFrom` in /health) is where exact history starts. A refused wallet is promoted next and answered asynchronously
   (503 "promotion queued" until done). This supersedes the rule below as the walk advances.
-- **Wallet index (2026-10-30):** not every wallet, only those a request names (explorer pages, API params/paths, wallet
-  RPC params; src/watch.ts → ctl_wallet_index). src/promoter/wallets.ts watches each (unless busier than
-  WALLET_MAX_TXS_DAY) and copies its raw txs into kept_txs, so its txs live forever from `floor`. Below the oldest raw
-  block: a full-block scan on our node, once synced (not built yet).
+- **Wallet txs, all wallets (2026-10-30):** idx_wallet_txs points every wallet at its txs
+  (migration 015: from go-live by a view on raw_txs, below it by src/promoter/scan.ts, SCAN=1, one pass over our synced
+  node, ~2.5 days). The explorer reads txs through it (ClickHouse, else the node).
+- **Wallet index (2026-10-30):** full tx rows (kept_txs) forever only for wallets a request names (explorer pages, API
+  params/paths, wallet RPC params; src/watch.ts → ctl_wallet_index). src/promoter/wallets.ts watches each (unless busier
+  than WALLET_MAX_TXS_DAY) and copies its raw txs into kept_txs. Older rows come from the node through idx_wallet_txs.
 - **Data from go-live forward only** (until the walk runs). No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
   of a pool that trades now) and **token promotion** (changed 2026-10-30, so apps can drop Blockscout): a token older than
   go-live is queued the first time the API refuses it, and src/promoter fetches its pre-go-live Transfer history once into

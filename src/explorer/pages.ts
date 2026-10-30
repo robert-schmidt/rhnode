@@ -4,7 +4,7 @@
 import { rows } from "../ch.ts";
 import { ago, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
 import { bare, lookup, methods } from "./names.ts";
-import { indexState, requested } from "../watch.ts";
+import { requested } from "../watch.ts";
 
 export type Rpc = (method: string, params: unknown[]) => Promise<{ result?: unknown; error?: { message: string } }>;
 export type Page = { status: number; title: string; body: Html; immutable?: boolean; redirect?: string; refresh?: number };
@@ -227,23 +227,51 @@ ${r.logs.map((l) => html`<details class="log"><summary><span class="muted">#${nu
 
 // --- address (and token) ---
 
+type WTx = { hash: string; block: string; tx_index: number; from: string; to: string; v: string; selector: string; status: number; created: string; ts: number };
+const TX_COLS = "hash, block, tx_index, `from`, `to`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts";
+
+/** The address's latest 25 txs below block `before`: pointers from idx_wallet_txs (migration 015), each tx from
+ *  ClickHouse while it holds it, else from the node. */
+async function walletTxs(rpc: Rpc, a: string, before: number): Promise<WTx[]> {
+  const ptrs = await rows<{ block: string; tx_index: number }>(
+    `SELECT DISTINCT block, tx_index FROM idx_wallet_txs WHERE wallet = {a:String} ${before ? "AND block < {before:UInt64}" : ""}
+     ORDER BY block DESC, tx_index DESC LIMIT 25`, { a, before });
+  if (!ptrs.length) return [];
+  const b = [...new Set(ptrs.map((p) => p.block))];
+  const have = new Map((await rows<WTx>(
+    `SELECT ${TX_COLS} FROM raw_txs WHERE block IN {b:Array(UInt64)} AND sign = 1
+     UNION ALL SELECT ${TX_COLS} FROM kept_txs FINAL WHERE block IN {b:Array(UInt64)} AND sign = 1`, { b })).map((t) => [`${t.block}:${t.tx_index}`, t]));
+  return Promise.all(ptrs.map(async (p) => have.get(`${p.block}:${p.tx_index}`) ?? nodeTx(rpc, Number(p.block), p.tx_index)));
+}
+async function nodeTx(rpc: Rpc, n: number, i: number): Promise<WTx> {
+  const [t, blk] = await Promise.all([
+    call<RpcTx>(rpc, "eth_getTransactionByBlockNumberAndIndex", ["0x" + n.toString(16), "0x" + i.toString(16)]),
+    call<{ timestamp: string }>(rpc, "eth_getBlockByNumber", ["0x" + n.toString(16), false]),
+  ]);
+  const r = await call<{ status: string; contractAddress: string | null }>(rpc, "eth_getTransactionReceipt", [t.hash]);
+  return { hash: t.hash, block: String(n), tx_index: i, from: t.from.toLowerCase(), to: (t.to ?? "").toLowerCase(), v: BigInt(t.value).toString(),
+    selector: t.input.length >= 10 ? t.input.slice(0, 10).toLowerCase() : "", status: num(r.status), created: (r.contractAddress ?? "").toLowerCase(), ts: num(blk.timestamp) };
+}
+/** Where every address's txs are indexed from (0: all of them): the scan's floor, or go-live before it starts. */
+async function txsFrom(): Promise<{ from: number; scan: number | null; golive: number }> {
+  const [r] = await rows<{ scan: string; golive: string; has_scan: number }>(
+    "SELECT minIf(block, name = 'scan') AS scan, minIf(block, name = 'golive') AS golive, countIf(name = 'scan') AS has_scan FROM ctl_cursors FINAL WHERE name IN ('scan', 'golive')");
+  const golive = Number(r?.golive ?? 0), scan = r?.has_scan ? Number(r.scan) : null;
+  return { from: scan ?? golive, scan, golive };
+}
+
 export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<Page> {
   const txb = /^\d{1,12}$/.test(q.get("txb") ?? "") ? Number(q.get("txb")) : 0;
   const tfb = /^\d{1,12}$/.test(q.get("tfb") ?? "") ? Number(q.get("tfb")) : 0;
   requested(a);
-  const ix = await indexState(a);
-  // an indexed address has every tx since its floor in kept_txs; others only what raw_txs still holds
-  const src = ix.status === "indexed" ? "kept_txs FINAL" : "raw_txs";
-  const [bal, code, [c], meta, txs, tfs] = await Promise.all([
+  const [bal, code, [c], meta, txs, cov, tfs] = await Promise.all([
     call<string>(rpc, "eth_getBalance", [a, "latest"]),
     call<string>(rpc, "eth_getCode", [a, "latest"]),
     rows<{ kind: string; impl: string; deployer: string; block: string; created: number; fingerprint: string }>(
       "SELECT kind, impl, deployer, block, created, fingerprint FROM contracts FINAL WHERE address = {a:String}", { a }),
     tokens([a]),
-    rows<{ hash: string; block: string; from: string; to: string; v: string; selector: string; status: number; created: string; ts: number }>(
-      `SELECT hash, block, \`from\`, \`to\`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts FROM ${src}
-       WHERE (\`from\` = {a:String} OR \`to\` = {a:String} OR created = {a:String}) AND sign = 1 ${txb ? "AND block < {txb:UInt64}" : ""}
-       ORDER BY block DESC, tx_index DESC LIMIT 25`, { a, txb }),
+    walletTxs(rpc, a, txb),
+    txsFrom(),
     rows<{ tx_hash: string; block: string; token: string; from: string; to: string; amt: string; ts: number }>(
       `SELECT tx_hash, block, token, \`from\`, \`to\`, toString(amount) AS amt, toUnixTimestamp(time) AS ts FROM kept_transfers_by_wallet FINAL
        WHERE wallet = {a:String} ${tfb ? "AND block < {tfb:UInt64}" : ""} ORDER BY block DESC, log_index DESC LIMIT 25`, { a, tfb }),
@@ -258,7 +286,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
     tok ? tokenSection(a, tok) : Promise.resolve(html``),
   ]);
   const title = tok ? `${tok.name || tok.symbol || "Token"} (${tok.symbol})` : isContract ? "Contract" : "Address";
-  return { status: 200, title: `${title} ${short(a)}`, body: html`
+  return { status: 200, title: `${title} ${short(a)}`, refresh: cov.from && !txb && !tfb ? 60 : undefined, body: html`
 <h1>${title}</h1><p class="mono wrap">${a}</p>
 <dl><dt>Balance</dt><dd>${eth(big(bal))}</dd>
 <dt>Type</dt><dd>${isContract ? html`Contract${c?.kind ? html` <span class="tag">${c.kind}</span>` : ""}` : "Account (EOA)"}</dd>
@@ -266,11 +294,14 @@ ${impl ? html`<dt>Implementation</dt><dd>${link("address", impl, impl)}</dd>` : 
 ${c?.deployer ? html`<dt>Deployed by</dt><dd>${link("address", c.deployer, c.deployer)} in block ${link("block", c.block)}</dd>` : ""}
 ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}</dl>
 ${token}
-<h2>Transactions <span class="muted small">(${ix.status === "indexed" ? html`all since block ${link("block", String(ix.floor))}` : ix.status === "busy" ? "last 14 days: too busy to keep" : "last 14 days; indexing this address, kept from now on"})</span></h2>
+<h2>Transactions <span class="muted small">(${cov.from ? html`all since block ${link("block", String(cov.from))}` : "all"})</span></h2>
+${cov.from ? html`<p class="loading"><span class="spin"></span> ${cov.scan == null
+  ? html`Older ones (before block ${cov.from}) are indexed once our node has finished syncing.`
+  : html`Older ones are being indexed from our node, newest first: ${(100 * (cov.golive - cov.scan) / cov.golive).toFixed(1)}% done.`} This page refreshes itself.</p>` : ""}
 ${txs.length ? html`<div class="tw"><table><tr><th>Tx</th><th>Time (UTC)</th><th>Method</th><th>From → To</th><th>Value</th></tr>
 ${txs.map((t) => html`<tr${t.status ? "" : html` class="failed"`}><td>${link("tx", t.hash)}</td><td>${when(t.ts)}</td><td><span class="tag">${method(t.to || null, t.created ? "" : t.selector, names)}</span></td>
 <td>${t.from === a ? html`<b>self</b>` : link("address", t.from)} → ${t.created ? "new contract" : t.to === a ? html`<b>self</b>` : t.to ? link("address", t.to) : "—"}</td><td>${value(t.v)}</td></tr>`)}</table></div>
-${txs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?txb=${txs.at(-1)!.block}${tfb ? `&tfb=${tfb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None${ix.status === "indexed" ? "" : " in the last 14 days"}.</p>`}
+${txs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?txb=${txs.at(-1)!.block}${tfb ? `&tfb=${tfb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None${cov.from ? " since then" : ""}.</p>`}
 <h2>Token transfers <span class="muted small">(ERC-20, since our history starts)</span></h2>
 ${tfs.length ? html`<div class="tw"><table><tr><th>Tx</th><th>Time (UTC)</th><th>Token</th><th>From → To</th><th>Amount</th></tr>
 ${tfs.map((t) => { const m = tmeta.get(t.token); return html`<tr><td>${link("tx", t.tx_hash)}</td><td>${when(t.ts)}</td><td>${link("address", t.token, sym(m, t.token))}</td>

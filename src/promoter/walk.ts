@@ -38,7 +38,7 @@ async function logs(src: Client, from: number, to: number): Promise<Log[]> {
   return [...await logs(src, from, mid), ...await logs(src, mid + 1, to)];
 }
 
-async function idle(): Promise<boolean> {
+export async function idle(): Promise<boolean> {
   if (!nitroSynced() || nitro.head == null) return false;
   const [t] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'tip'");
   return nitro.head - Number(t?.block ?? 0) <= MAX_LAG;
