@@ -99,6 +99,7 @@ services:
     environment:
       GOMEMLIMIT: ${NITRO_GOMEMLIMIT:-5000MiB} # container limit − Pebble/fastcache (off-heap) − margin
       MALLOC_ARENA_MAX: "2"
+      GOGC: ${NITRO_GOGC:-100} # the live heap is small (~0.5 GB, pprof 2026-10-30): at 100 it collects every ~1.3 s
     volumes:
       - nitro:/home/user/.arbitrum # the image runs as uid 1000 `user` (not /home/nitro as older docs say)
       - ./nitro:/home/user/config:ro
@@ -114,7 +115,10 @@ services:
       - --execution.caching.state-scheme=path # must match the snapshot (full-path)
       - --execution.caching.database-cache=${NITRO_DB_CACHE:-768}
       - --execution.caching.trie-clean-cache=${NITRO_TRIE_CACHE:-384}
-      - --execution.caching.snapshot-cache=384
+      - --execution.caching.snapshot-cache=${NITRO_SNAPSHOT_CACHE:-384}
+      # The log index costs ~0.5 core while catching up (pprof 2026-10-30). The default covers ~11 days, which ClickHouse
+      # already holds. --execution.rpc.log-no-history turns it off; --execution.rpc.log-history=0 indexes the whole chain.
+      - ${NITRO_LOG_INDEX:---execution.rpc.log-history=9400000}
       - --execution.caching.trie-dirty-cache=256
       - --execution.caching.stylus-lru-cache-capacity=128
       - --persistent.pebble.max-concurrent-compactions=3
