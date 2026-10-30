@@ -83,7 +83,7 @@ services:
       - --chain.info-files=/home/user/config/robinhood-chain-info.json
       - --init.genesis-json-file=/home/user/config/robinhood-genesis.json
       - --persistent.chain=/home/user/.arbitrum/robinhood
-      - --parent-chain.connection.url=${L1_RPC:-https://ethereum-rpc.publicnode.com}
+      - --parent-chain.connection.url=${L1_RPC:-https://eth.drpc.org} # keyless and serves old logs; PublicNode wants a token past ~128 blocks (2026-10-30)
       - --parent-chain.blob-client.beacon-url=${L1_BEACON:-https://ethereum-beacon-api.publicnode.com}
       - --node.feed.input.url=wss://feed.mainnet.chain.robinhood.com,wss://delayed-feed.mainnet.chain.robinhood.com
       - --execution.forwarding-target=https://rpc.mainnet.chain.robinhood.com
