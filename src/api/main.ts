@@ -3,13 +3,14 @@
 // TLS proxy in front. Every route except /health needs an API key: `x-api-key` header, `?apikey=` (Etherscan
 // style), or a path suffix `/rpc/<key>`, `/ws/<key>` (Alchemy style, for clients that only take a URL).
 import http from "node:http";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { cfg } from "../config.ts";
 import { BLOCKS, connect } from "../bus.ts";
 import { handle, logStats } from "./rpc.ts";
 import type { RpcReply } from "../chain/upstream.ts";
 import { v1, v2, walletFirst } from "./compat.ts";
 import { coverage } from "./coverage.ts";
+import { isNitro, nitro, nitroSynced, watchNitro } from "../chain/nitro.ts";
 import { matcher, type Sub } from "./subs.ts";
 
 if (!cfg.api.keys.size) throw new Error("API_KEYS is empty: set API_KEYS=name:key[,name:key] in .env");
@@ -61,28 +62,11 @@ async function body(req: http.IncomingMessage): Promise<string> {
 
 // /health (no key): whether clients should use rhnode right now, and for what. 503 when not ok, so a plain
 // status check is enough; the fields let a client decide per subsystem (e.g. every eth_call only when node = "nitro").
-const NITRO = process.env.NITRO_HTTP ?? ""; // our node, when the stack runs one (probed even before /rpc uses it)
-const NITRO_ROUTED = cfg.upstreamHttp.some((u) => /\/\/nitro[:/]/.test(u.url));
+const NITRO_ROUTED = cfg.upstreamHttp.some((u) => isNitro(u.url));
+if (process.env.NITRO_HTTP) watchNitro(process.env.NITRO_HTTP); // probed even before /rpc is routed to it
 const MAX_LAG_BLOCKS = 600; // ~1 min at ~104 ms blocks
 const MAX_STREAM_AGE_S = 30;
-const NITRO_SYNCED_BLOCKS = 50;
 let lastBlockAt = 0;
-
-// Nitro's head against the sequencer's (the official RPC), every 10 s. `nitroSince`: when it last became synced.
-const nitro = { head: null as number | null, behind: null as number | null, since: 0 };
-async function headOf(url: string): Promise<number> {
-  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}', signal: AbortSignal.timeout(3_000) });
-  return Number(((await r.json()) as { result: string }).result);
-}
-async function probeNitro() {
-  try {
-    const [n, ref] = await Promise.all([headOf(NITRO), headOf(cfg.api.sendHttp[0].url)]);
-    nitro.head = n; nitro.behind = Math.max(0, ref - n);
-  } catch { nitro.head = nitro.behind = null; }
-  const synced = nitro.behind != null && nitro.behind <= NITRO_SYNCED_BLOCKS;
-  if (!synced) nitro.since = 0; else if (!nitro.since) nitro.since = Date.now();
-}
-if (NITRO) { void probeNitro(); setInterval(probeNitro, 10_000); }
 
 async function health() {
   const c = await coverage();
@@ -180,22 +164,59 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
+// Two feeds into one fan-out. Ingest's (Redis, ~2 s behind: it publishes after the ClickHouse insert) always runs; our
+// node's (newHeads + one local eth_getLogs per block, ~100 ms) runs while the node is synced. Each block goes out once,
+// in order: whichever feed delivers it first, and the node's feed fills its own gaps.
+// ponytail: no `removed: true` on a reorg (the single sequencer hasn't reorged); a replaced block number is just skipped.
+type Blk = { header: Record<string, unknown>; logs: Record<string, unknown>[] };
+let lastSent = 0;
+function fanout(blocks: Blk[]) {
+  lastBlockAt = Date.now();
+  for (const b of blocks) {
+    const n = Number(b.header.number);
+    if (n <= lastSent) continue;
+    lastSent = n;
+    for (const [ws, c] of conns) for (const [id, sub] of c.subs) {
+      for (const result of sub.match(b)) ws.send(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"${id}","result":${JSON.stringify(result)}}}`);
+    }
+  }
+}
+
 const bus = await connect();
 if (bus) {
   const sub = bus.duplicate();
   sub.on("error", (e: Error) => console.warn(`[redis] ${e.message}`));
   await sub.connect();
-  await sub.subscribe(BLOCKS, (msg: string) => {
-    lastBlockAt = Date.now();
-    if (!conns.size) return;
-    const blocks = JSON.parse(msg) as { header: Record<string, unknown>; logs: Record<string, unknown>[] }[];
-    for (const [ws, c] of conns) for (const [id, s] of c.subs) {
-      for (const b of blocks) {
-        for (const result of s.match(b)) ws.send(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"${id}","result":${JSON.stringify(result)}}}`);
+  await sub.subscribe(BLOCKS, (msg: string) => fanout(JSON.parse(msg) as Blk[]));
+} else console.warn("[api] REDIS_URL unset: /ws subscriptions get no events from ingest");
+
+const NITRO_WS = process.env.NITRO_WS ?? "";
+async function nodeRpc(method: string, params: unknown[]) {
+  const r = await fetch(nitro.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(5_000) });
+  return ((await r.json()) as { result: unknown }).result;
+}
+let fastBusy = Promise.resolve();
+function fastFeed() {
+  const ws = new WebSocket(NITRO_WS);
+  ws.on("open", () => ws.send('{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}'));
+  ws.on("message", (raw) => {
+    const head = (JSON.parse(String(raw)) as { params?: { result?: Record<string, unknown> } }).params?.result;
+    if (!head || !nitroSynced() || !lastSent) return; // lastSent: start from where ingest's feed is, never from nothing
+    const n = Number(head.number);
+    fastBusy = fastBusy.then(async () => {
+      // Our gap first (a missed head), at most 200 blocks; beyond that ingest's feed is the one catching up.
+      for (let k = Math.max(lastSent + 1, n - 200); k <= n; k++) {
+        const h = k === n ? head : (await nodeRpc("eth_getBlockByNumber", ["0x" + k.toString(16), false])) as Record<string, unknown>;
+        if (!h) return;
+        const logs = (await nodeRpc("eth_getLogs", [{ blockHash: h.hash }])) as Record<string, unknown>[];
+        fanout([{ header: { ...h, transactions: undefined }, logs }]);
       }
-    }
+    }).catch((e: Error) => console.warn(`[fastfeed] ${e.message}`));
   });
-} else console.warn("[api] REDIS_URL unset: /ws subscriptions get no events");
+  ws.on("error", () => {});
+  ws.on("close", () => setTimeout(fastFeed, 5_000));
+}
+if (NITRO_WS && process.env.NITRO_HTTP) fastFeed();
 
 setInterval(() => {
   if (!stats.size) return;

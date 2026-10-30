@@ -69,6 +69,10 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
        GROUP BY token`,
       { t: chunk, zero: ZERO },
     );
+    // A token whose every balance went back to 0 has no agg_balances rows left (SummingMergeTree drops zero sums), so it
+    // isn't in `stats`: it still gets its row, or its card would keep the last non-zero state (wRDDT, 2026-10-30).
+    const have = new Set(stats.map((s) => s.token));
+    for (const token of chunk) if (!have.has(token)) stats.push({ token, holder_count: "0", top10: "0", minted: "0" });
     const known = new Map((await rows<{ token: string; name: string; symbol: string; decimals: number }>(
       "SELECT token, name, symbol, decimals FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t: chunk },
     )).map((r) => [r.token, r]));
@@ -92,13 +96,36 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
   }
 }
 
+/** Hourly: a complete token whose totalSupply() moved without a Transfer we saw (rebasing, a non-standard mint) is
+ *  re-projected, which clears `complete` when minted no longer matches. One multicall per 500 tokens. */
+export async function driftSweep(up: Client, tip: number): Promise<number> {
+  const done = await rows<{ token: string; supply: string }>("SELECT token, toString(total_supply) AS supply FROM serve_tokens FINAL WHERE complete = 1");
+  const drifted: string[] = [];
+  for (let i = 0; i < done.length; i += 500) {
+    const chunk = done.slice(i, i + 500);
+    const reads = await readTokens(up, tip, chunk.map(({ token }) => ({ token, fns: ["totalSupply"] as Fn[] })));
+    for (const { token, supply } of chunk) {
+      const s = reads.get(token)?.totalSupply;
+      if (typeof s !== "bigint" || s.toString() !== supply) drifted.push(token);
+    }
+  }
+  if (drifted.length) await projectTokens(up, drifted, tip, `drift:${tip}`);
+  return drifted.length;
+}
+
 const cursor = async (name: string) => Number((await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = {name:String}", { name }))[0]?.block ?? 0);
 
 if (import.meta.main) {
   const up = upstream(cfg.upstreamHttp);
   const lookup = upstream(cfg.lookupHttp, { attempts: 2 });
   let last = await cursor("projector");
+  let sweptAt = 0;
   for (;;) {
+    if (Date.now() - sweptAt > 3_600_000 && last) {
+      sweptAt = Date.now();
+      const n = await driftSweep(up, last).catch((e: Error) => { console.warn(`[drift] ${e.message}`); return -1; });
+      console.log(JSON.stringify({ at: new Date().toISOString(), drift: n }));
+    }
     const tip = await cursor("tip");
     if (!last) last = tip; // cold start: from now on
     if (tip <= last) { await new Promise((r) => setTimeout(r, 2000)); continue; }

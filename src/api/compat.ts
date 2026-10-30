@@ -61,13 +61,13 @@ type Tx = { block: string; ts: number; tx_hash: string; log_index: number; tx_in
 async function tokentx(q: URLSearchParams): Promise<Reply> {
   const wallet = q.get("address")?.toLowerCase(), token = q.get("contractaddress")?.toLowerCase();
   if ((wallet && !ADDR.test(wallet)) || (token && !ADDR.test(token)) || (!wallet && !token)) return bad("address or contractaddress required");
-  // A token whose every mint we saw, still fully in raw: its history is complete from block 0.
+  // History from block 0 is held for a promoted token, or one launched inside the raw window (its whole life is in raw).
+  // Not "complete" balances: those only say the supply was 0 at go-live, not that nothing happened before (wRDDT).
   let fullFrom = Infinity;
   if (token && !wallet && (await promotion(token, false)) === "done") return tokentxKept(q, token);
   if (token && !wallet) {
-    const [t] = await rows<{ complete: number; first: string }>(
-      "SELECT (SELECT max(complete) FROM serve_tokens FINAL WHERE token = {t:String}) AS complete, (SELECT min(block) FROM ev_transfers WHERE token = {t:String}) AS first", { t: token });
-    if (t?.complete && Number(t.first) >= (await coverage()).rawFrom) fullFrom = 0;
+    const [t] = await rows<{ launched: string }>("SELECT min(block) AS launched FROM kept_launches WHERE token = {t:String} AND kind = 'launch'", { t: token });
+    if (Number(t?.launched) && Number(t.launched) >= (await coverage()).rawFrom) fullFrom = 0;
   }
   const got = await windowed<Tx>(q, fullFrom, (lo, hi, desc, limit, skip) => rows<Tx>(
     `SELECT t.block, toUnixTimestamp(t.time) AS ts, t.tx_hash, t.log_index, t.tx_index, t.token, t.\`from\` AS \`from\`, t.\`to\` AS \`to\`, toString(t.amount) AS amount, s.name, s.symbol, s.decimals
@@ -167,6 +167,22 @@ type Sourcify = {
   sources?: Record<string, { content?: string }>;
 };
 
+// Sourcify doesn't resolve every proxy (a BeaconProxy shows isProxy false): read the EIP-1967 slots on chain then.
+const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+const BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
+const slotAddr = async (a: string, slot: string) => {
+  const r = (await up.forward("eth_getStorageAt", [a, slot, "latest"])) as { result?: string };
+  return r.result && BigInt(r.result) ? "0x" + r.result.slice(-40) : "";
+};
+async function implementation(a: string): Promise<string> {
+  const impl = await slotAddr(a, IMPL_SLOT);
+  if (impl) return impl;
+  const beacon = await slotAddr(a, BEACON_SLOT);
+  if (!beacon) return "";
+  const r = (await up.forward("eth_call", [{ to: beacon, data: "0x5c60da1b" }, "latest"])) as { result?: string }; // implementation()
+  return r.result && r.result.length >= 66 && BigInt(r.result) ? "0x" + r.result.slice(26, 66) : "";
+}
+
 async function sourcecode(q: URLSearchParams): Promise<Reply> {
   const a = q.get("address")?.toLowerCase();
   if (!a || !ADDR.test(a)) return bad("address required");
@@ -176,6 +192,7 @@ async function sourcecode(q: URLSearchParams): Promise<Reply> {
     if (r.status !== 200 && r.status !== 404) return fallback("/api", q, `sourcify: HTTP ${r.status}`);
     const j = r.status === 200 ? ((await r.json()) as Sourcify) : null;
     const s = j?.match ? j : null;
+    const impl = s && (s.proxyResolution?.implementations?.[0]?.address.toLowerCase() || await implementation(a).catch(() => ""));
     c = { at: Date.now(), row: s && {
       // Etherscan's multi-file convention: the standard-json input wrapped in an extra pair of braces.
       SourceCode: `{${JSON.stringify({ language: "Solidity", sources: s.sources ?? {} })}}`,
@@ -185,8 +202,8 @@ async function sourcecode(q: URLSearchParams): Promise<Reply> {
       OptimizationUsed: s.compilation?.compilerSettings?.optimizer?.enabled ? "1" : "0",
       Runs: String(s.compilation?.compilerSettings?.optimizer?.runs ?? ""),
       EVMVersion: s.compilation?.compilerSettings?.evmVersion ?? "default",
-      IsProxy: s.proxyResolution?.isProxy ? "true" : "false",
-      ImplementationAddress: s.proxyResolution?.implementations?.[0]?.address.toLowerCase() ?? "",
+      IsProxy: s.proxyResolution?.isProxy || impl ? "true" : "false",
+      ImplementationAddress: impl || "",
       ConstructorArguments: "", Library: "", LicenseType: "", SwarmSource: "",
     } };
     sources.delete(a);

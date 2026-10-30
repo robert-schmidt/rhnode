@@ -3,6 +3,7 @@
 // lags the head and doesn't have the block yet) only rests it briefly. Never logs a URL, only
 // its host: a URL can carry a key.
 import type { Upstream } from "../config.ts";
+import { isNitro, nitroSynced, watchNitro } from "./nitro.ts";
 
 type Ep = { host: string; url: string; rps: number; tokens: number; at: number; downUntil: number; fails: number; ok: number; err: number; nulls: number };
 
@@ -14,10 +15,14 @@ export class RpcError extends Error {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** `ordered`: always the first endpoint that is up (failover), instead of spreading calls round-robin. */
+/** `ordered`: always the first endpoint that is up (failover), instead of spreading calls round-robin. A list with our
+ *  node in it is always ordered, and the node is skipped while it isn't synced (src/chain/nitro.ts). */
 export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?: number; ordered?: boolean } = {}) {
   if (!list.length) throw new Error("no upstream endpoints");
   const eps: Ep[] = list.map(({ url, rps }) => ({ host: new URL(url).host, url, rps, tokens: rps, at: Date.now(), downUntil: 0, fails: 0, ok: 0, err: 0, nulls: 0 }));
+  const node = list.find((u) => isNitro(u.url));
+  if (node) { watchNitro(node.url); opts = { ...opts, ordered: true }; }
+  const usable = (e: Ep) => !(node && eps.length > 1 && e.url === node.url && !nitroSynced());
   const attempts = opts.attempts ?? 30;
   let rr = 0;
   let id = 0;
@@ -29,7 +34,7 @@ export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?
         const e = eps[((opts.ordered ? 0 : rr) + i) % eps.length];
         e.tokens = Math.min(e.rps, e.tokens + ((now - e.at) / 1000) * e.rps);
         e.at = now;
-        if (e.downUntil <= now && e.tokens >= 1) {
+        if (e.downUntil <= now && e.tokens >= 1 && usable(e)) {
           e.tokens -= 1;
           rr = (rr + i + 1) % eps.length;
           return e;

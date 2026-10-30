@@ -66,6 +66,7 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       REDIS_URL: redis://redis:6379
       NITRO_HTTP: http://nitro:8547 # /health probes it; harmless without the node profile
+      NITRO_WS: ws://nitro:8548 # the fast /ws feed, used only while the node is synced
     ports:
       - "127.0.0.1:${API_PORT:-8080}:8080"
     depends_on:
