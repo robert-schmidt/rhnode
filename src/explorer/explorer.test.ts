@@ -49,3 +49,10 @@ test("access tokens and codes", async () => {
   (cfg.explorer as { secret: string }).secret = "other";
   assert.equal(g.verify(t), null);
 });
+
+test("push4s: dispatcher constants only (not PUSH4 bytes inside another push)", async () => {
+  const { push4s } = await import("./names.ts");
+  const s = push4s("0x63a9059cbb14" + "7f" + "63095ea7b3".padEnd(64, "0") + "00");
+  assert.ok(s.has("0xa9059cbb"));
+  assert.ok(!s.has("0x095ea7b3"));
+});

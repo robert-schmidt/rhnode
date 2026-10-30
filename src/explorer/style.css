@@ -34,3 +34,4 @@ svg.chart path { fill: none; stroke: var(--acc); stroke-width: 1.5; vector-effec
 main form.row { display: flex; gap: 6px; max-width: 560px; } main form.inline { display: inline; }
 .steps li { margin: 6px 0; } .note { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 14px; margin: 12px 0; }
 .token { font-size: 15px; padding: 8px; background: var(--tag); border-radius: 4px; user-select: all; }
+table.stats-table th:first-child { color: var(--fg); font-weight: 500; } table.stats-table td { font-variant-numeric: tabular-nums; }

@@ -18,7 +18,7 @@ type Route = { key: string; ttl: number; q?: string; run: (rpc: Rpc) => Promise<
 
 /** PURE: the page a path asks for, with a cache key made only of validated parts; null = not ours. */
 export function route(path: string, qs: URLSearchParams): Route {
-  if (path === "/") return { key: "/", ttl: 2, run: () => home() };
+  if (path === "/") return { key: "/", ttl: 2, run: (rpc) => home(rpc) };
   let m = path.match(/^\/block\/([^/]+)$/);
   if (m) {
     if (NUM.test(m[1])) return { key: `/block/${Number(m[1])}`, ttl: 5, run: (rpc) => block(rpc, String(Number(m![1]))) };
@@ -67,7 +67,7 @@ async function render(r: Exclude<Route, null | { redirect: string }>, rpc: Rpc):
   try {
     const p = await r.run(rpc);
     if (p.redirect) return { status: 302, body: "", redirect: p.redirect, ttl: r.ttl };
-    return { status: p.status, body: page(p.title, p.body, { q: r.q }), ttl: p.immutable ? IMMUTABLE_S : p.status === 200 ? r.ttl : 30 };
+    return { status: p.status, body: page(p.title, p.body, { q: r.q, refresh: p.refresh }), ttl: p.immutable ? IMMUTABLE_S : p.status === 200 ? r.ttl : 30 };
   } catch (e) { // logged, never shown (it can carry SQL or an upstream URL)
     console.warn(`[explorer] ${r.key}: ${(e as Error).message}`);
     return { status: 503, body: page("Unavailable", html`<h1>Temporarily unavailable</h1><p>The node or the index did not answer. Try again in a moment.</p>`), ttl: 0 };

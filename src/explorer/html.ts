@@ -27,9 +27,9 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Html 
 
 export const REPO = "https://github.com/robert-schmidt/rhnode";
 
-export function page(title: string, body: Html, opts: { q?: string } = {}): string {
+export function page(title: string, body: Html, opts: { q?: string; refresh?: number } = {}): string {
   return html`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.refresh ? html`<meta http-equiv="refresh" content="${opts.refresh}">` : ""}
 <title>${title} · Robinhood Chain explorer</title><link rel="stylesheet" href="${CSS_PATH}">
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
 <body><header><a class="brand" href="/">rh<span>node</span> explorer</a>
