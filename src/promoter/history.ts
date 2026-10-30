@@ -1,4 +1,4 @@
-// The history pass (2026-10-30, Robert: "single pass with full decoding"). From go-live down to genesis on our own node,
+// The history pass (2026-10-30, "single pass with full decoding"). From go-live down to genesis on our own node,
 // newest first, every block and all its receipts are read once and decoded by ingest's own decoder
 // (src/ingest/decode.ts). The rows go into the hist_* tables (migration 017), whose views keep forever, with the live
 // views' expressions: every wallet's tx pointers, ETH transfers, first txs, ERC-20 transfers, swaps, launches, pools,

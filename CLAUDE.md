@@ -18,7 +18,7 @@ that read the chain, and gives more insight than either.
 - **API split (2026-10-30):** the public API (/rpc, /ws, /api, /v1, /health) is a separate private service on an edge box.
   This stack publishes ClickHouse/Redis/Nitro on `NODE_BIND` (loopback by default) and `ops/firewall.sh` admits only
   `API_HOST`. Schema changes here must stay compatible with the API's pinned core commit until it bumps.
-- **History pass (changed 2026-10-30, Robert: "single pass with full decoding"):** once our Nitro is synced,
+- **History pass (changed 2026-10-30, "single pass with full decoding"):** once our Nitro is synced,
   src/promoter/history.ts reads every block from go-live back to genesis once (block + all receipts), newest first, and
   runs ingest's decoder over it. Migration 017's Null tables + views keep forever, with the live views' expressions:
   wallet tx pointers, ETH edges, first txs, ERC-20 transfers, swaps, launches, pools, Relay fills, UserOperationEvents;

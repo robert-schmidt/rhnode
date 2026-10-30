@@ -1,4 +1,4 @@
--- The history pass (src/promoter/history.ts, 2026-10-30, Robert: "single pass with full decoding"): every block from
+-- The history pass (src/promoter/history.ts, 2026-10-30, "single pass with full decoding"): every block from
 -- go-live down to genesis is decoded once by ingest's own decoder, and its rows are inserted here. These tables keep
 -- nothing (Null engine); their views write what lives forever, with the same expressions as the live views on
 -- raw_txs/ev_* (migrations 001, 010, 015, 016), so history and live data can't differ. agg_balances is summed by the
@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS hist_swaps AS ev_swaps ENGINE = Null;
 CREATE TABLE IF NOT EXISTS hist_launches AS ev_launches ENGINE = Null;
 CREATE TABLE IF NOT EXISTS hist_pools AS ev_pools ENGINE = Null;
 CREATE TABLE IF NOT EXISTS hist_relay AS ev_relay ENGINE = Null;
-CREATE TABLE IF NOT EXISTS hist_logs AS raw_logs ENGINE = Null; -- only ERC-4337 UserOperationEvent logs are sent here
+-- only ERC-4337 UserOperationEvent logs are sent here
+CREATE TABLE IF NOT EXISTS hist_logs AS raw_logs ENGINE = Null;
 
 -- txs: every wallet's tx pointers (015), ETH transfers that happened (016), each sender's first tx
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_hist_idx_wallet_txs TO idx_wallet_txs AS
