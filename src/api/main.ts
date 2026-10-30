@@ -8,7 +8,7 @@ import { cfg } from "../config.ts";
 import { BLOCKS, connect } from "../bus.ts";
 import { handle, logStats } from "./rpc.ts";
 import type { RpcReply } from "../chain/upstream.ts";
-import { v1, v2 } from "./compat.ts";
+import { v1, v2, walletFirst } from "./compat.ts";
 import { coverage } from "./coverage.ts";
 import { matcher, type Sub } from "./subs.ts";
 
@@ -125,6 +125,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/api") {
       count(`${who} api ${url.searchParams.get("module")}.${url.searchParams.get("action")}`);
       const r = await v1(url.searchParams);
+      return send(res, r.status, r.body);
+    }
+    const first = req.method === "GET" && url.pathname.match(/^\/v1\/wallets\/([^/]+)\/first$/);
+    if (first) {
+      count(`${who} v1 wallets/first`);
+      const r = await walletFirst(first[1]);
       return send(res, r.status, r.body);
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/v2/")) {

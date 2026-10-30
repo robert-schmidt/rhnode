@@ -115,6 +115,48 @@ async function logs(q: URLSearchParams): Promise<Reply> {
   return ok((r.result as Record<string, string>[]).map((l) => ({ ...l, timeStamp: l.blockTimestamp })));
 }
 
+// contract.getsourcecode from Sourcify (keyless; ~37% of the top-40 tokens matched on 2026-10-30). Only a match is an
+// answer: "not on Sourcify" isn't "not verified" (Blockscout verifies on its own), so that's a 503 → Blockscout.
+// Matches are kept (bounded, newest 1,000); a miss is remembered for a day so we don't ask again.
+const SOURCIFY = "https://sourcify.dev/server/v2/contract/4663/";
+const sources = new Map<string, { at: number; row: Record<string, string> | null }>();
+type Sourcify = {
+  match?: string | null; abi?: unknown;
+  compilation?: { compilerVersion?: string; name?: string; compilerSettings?: { optimizer?: { enabled?: boolean; runs?: number }; evmVersion?: string } };
+  proxyResolution?: { isProxy?: boolean; implementations?: { address: string }[] };
+  sources?: Record<string, { content?: string }>;
+};
+
+async function sourcecode(q: URLSearchParams): Promise<Reply> {
+  const a = q.get("address")?.toLowerCase();
+  if (!a || !ADDR.test(a)) return bad("address required");
+  let c = sources.get(a);
+  if (!c || (!c.row && Date.now() - c.at > 86_400_000)) {
+    const r = await fetch(`${SOURCIFY}${a}?fields=compilation,abi,proxyResolution,sources`, { signal: AbortSignal.timeout(15_000) });
+    if (r.status !== 200 && r.status !== 404) return fallback("/api", q, `sourcify: HTTP ${r.status}`);
+    const j = r.status === 200 ? ((await r.json()) as Sourcify) : null;
+    const s = j?.match ? j : null;
+    c = { at: Date.now(), row: s && {
+      // Etherscan's multi-file convention: the standard-json input wrapped in an extra pair of braces.
+      SourceCode: `{${JSON.stringify({ language: "Solidity", sources: s.sources ?? {} })}}`,
+      ABI: JSON.stringify(s.abi ?? []),
+      ContractName: s.compilation?.name ?? "",
+      CompilerVersion: s.compilation?.compilerVersion ? `v${s.compilation.compilerVersion}` : "",
+      OptimizationUsed: s.compilation?.compilerSettings?.optimizer?.enabled ? "1" : "0",
+      Runs: String(s.compilation?.compilerSettings?.optimizer?.runs ?? ""),
+      EVMVersion: s.compilation?.compilerSettings?.evmVersion ?? "default",
+      IsProxy: s.proxyResolution?.isProxy ? "true" : "false",
+      ImplementationAddress: s.proxyResolution?.implementations?.[0]?.address.toLowerCase() ?? "",
+      ConstructorArguments: "", Library: "", LicenseType: "", SwarmSource: "",
+    } };
+    sources.delete(a);
+    sources.set(a, c);
+    for (const k of sources.keys()) { if (sources.size <= 1_000) break; sources.delete(k); }
+  }
+  if (!c.row) return fallback("/api", q, "not verified on Sourcify (it may still be on Blockscout)");
+  return { status: 200, body: { status: "1", message: "OK", result: [c.row] } };
+}
+
 export async function v1(q: URLSearchParams): Promise<Reply> {
   const m = `${q.get("module")}.${q.get("action")}`;
   switch (m) {
@@ -124,6 +166,7 @@ export async function v1(q: URLSearchParams): Promise<Reply> {
     case "account.txlist": return txlist(q);
     case "account.balancemulti": case "account.balance": return balances(q);
     case "logs.getLogs": return logs(q);
+    case "contract.getsourcecode": return sourcecode(q);
     default: return fallback("/api", q, `${m} isn't served by rhnode`);
   }
 }
@@ -139,5 +182,26 @@ export async function v2(path: string, q: URLSearchParams): Promise<Reply> {
   return { status: 200, body: {
     address: t.token, address_hash: t.token, name: t.name, symbol: t.symbol, decimals: t.decimals < 0 ? null : String(t.decimals), total_supply: t.supply,
     holders_count: t.holders, holders: t.holders, type: "ERC-20", exchange_rate: null,
+  } };
+}
+
+// GET /v1/wallets/{a}/first: the first tx rhnode saw this wallet send (agg_wallet_first, kept forever) and what it
+// means. born "exact": nonce 0, the wallet's real first tx; "before": it sent txs before rhnode's data starts (dataFrom);
+// "unknown": it hasn't sent a tx since then (it may only have received).
+let dataFrom: { block: number; timeStamp: number } | null = null;
+export async function walletFirst(wallet: string): Promise<Reply> {
+  const w = wallet.toLowerCase();
+  if (!ADDR.test(w)) return { status: 400, body: { error: "bad address" } };
+  if (!dataFrom) {
+    const [d] = await rows<{ b: string; t: number }>("SELECT min(tupleElement(first, 1)) AS b, toUnixTimestamp(min(tupleElement(first, 4))) AS t FROM agg_wallet_first");
+    if (Number(d?.b)) dataFrom = { block: Number(d.b), timeStamp: d.t };
+  }
+  const [r] = await rows<{ block: string; nonce: string; ts: number; hash: string }>(
+    `SELECT tupleElement(f, 1) AS block, tupleElement(f, 3) AS nonce, toUnixTimestamp(tupleElement(f, 4)) AS ts, tupleElement(f, 5) AS hash
+     FROM (SELECT min(first) AS f FROM agg_wallet_first WHERE wallet = {w:String} HAVING count() > 0)`, { w });
+  return { status: 200, body: {
+    wallet: w, dataFrom,
+    firstTx: r ? { block: Number(r.block), timeStamp: r.ts, hash: r.hash, nonce: Number(r.nonce) } : null,
+    born: !r ? "unknown" : Number(r.nonce) === 0 ? "exact" : "before",
   } };
 }
