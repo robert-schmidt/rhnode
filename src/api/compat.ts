@@ -40,7 +40,7 @@ async function windowed<T>(q: URLSearchParams, fullFrom: number, fetchPage: (lo:
 const promoState = new Map<string, { status: string; at: number }>();
 async function promotion(token: string, enqueue: boolean): Promise<string> {
   const c = promoState.get(token);
-  if (c && (c.status === "done" || Date.now() - c.at < 10_000)) return c.status;
+  if (c && (["done", "skipped", "notoken"].includes(c.status) || Date.now() - c.at < 10_000)) return c.status;
   const [r] = await rows<{ status: string }>("SELECT status FROM ctl_promotions FINAL WHERE token = {t:String}", { t: token });
   let status = r?.status ?? "";
   if (!status && enqueue) {
@@ -52,6 +52,7 @@ async function promotion(token: string, enqueue: boolean): Promise<string> {
 }
 const refused = (status: string) =>
   status === "skipped" ? "too many transfers before rhnode started indexing to hold its history"
+  : status === "notoken" ? "no ERC-20 transfers at this address"
   : status === "incomplete" || status === "failed" ? `history before rhnode started indexing: promotion ${status}`
   : "history before rhnode started indexing is being fetched (promotion queued); ask again in a few minutes";
 

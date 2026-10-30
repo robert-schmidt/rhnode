@@ -85,6 +85,11 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
     throw e;
   }
   const erc20 = ls.filter((l) => l.topics.length === 3);
+  const [seen] = await rows<{ n: string }>("SELECT count() AS n FROM ev_transfers WHERE token = {t:String} AND standard = 'erc20'", { t: token });
+  if (!erc20.length && !Number(seen?.n)) {
+    await ch.insert({ table: "ctl_watchlists", values: [{ list: "promoted", kind: "token", value: token, keep_bits: KEEP.WATCH_TOKEN, removed: 1, version: Date.now() }], format: "JSONEachRow" });
+    return { status: "notoken", transfers: 0, note: `${ls.length} Transfer logs, none ERC-20` };
+  }
   const tm = await times(erc20, calls);
   const rowsOut = erc20.map((l) => ({
     block: Number(l.blockNumber), tx_index: Number(l.transactionIndex), log_index: Number(l.logIndex), batch_index: 0,
