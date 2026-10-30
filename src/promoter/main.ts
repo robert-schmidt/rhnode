@@ -24,33 +24,34 @@ type Log = { blockNumber: string; transactionIndex: string; logIndex: string; tr
 const src = upstream(parseUpstreams(process.env.PROMOTE_HTTP ?? "https://robinhood-chain.gateway.tenderly.co|5,https://rpc.mainnet.chain.robinhood.com|5"), { attempts: 4, timeoutMs: 60_000, ordered: true });
 const up = upstream(cfg.upstreamHttp);
 const hex = (n: number) => "0x" + n.toString(16);
-let calls = 0;
+const CONCURRENCY = Number(process.env.PROMOTE_CONCURRENCY ?? 4);
+type Calls = { n: number };
 
-async function logs(token: string, from: number, to: number, out: Log[]): Promise<void> {
+async function logs(token: string, from: number, to: number, out: Log[], calls: Calls): Promise<void> {
   let r: { result?: unknown; error?: { message: string } };
-  calls++;
+  calls.n++;
   try { r = await src.forward("eth_getLogs", [{ address: token, topics: [TRANSFER], fromBlock: hex(from), toBlock: hex(to) }]); }
   catch (e) { r = { error: { message: (e as Error).message } }; }
   if (Array.isArray(r.result)) { for (const l of r.result as Log[]) out.push(l); }
   else {
     if (to - from < MIN_SPLIT) throw new Error(`getLogs ${from}-${to}: ${r.error?.message ?? "no result"}`);
     const mid = Math.floor((from + to) / 2);
-    await logs(token, from, mid, out);
+    await logs(token, from, mid, out, calls);
     if (out.length > MAX_TRANSFERS) return;
-    await logs(token, mid + 1, to, out);
+    await logs(token, mid + 1, to, out, calls);
   }
   if (out.length > MAX_TRANSFERS) throw new TooBig();
 }
 class TooBig extends Error {}
 
 /** Unix time per block, for logs a provider returned without blockTimestamp (or 0x0, as the official RPC does). */
-async function times(ls: Log[]): Promise<Map<number, number>> {
+async function times(ls: Log[], calls: Calls): Promise<Map<number, number>> {
   const t = new Map<number, number>();
   for (const l of ls) if (l.blockTimestamp && Number(l.blockTimestamp)) t.set(Number(l.blockNumber), Number(l.blockTimestamp));
   const missing = [...new Set(ls.map((l) => Number(l.blockNumber)).filter((b) => !t.has(b)))];
   for (let i = 0; i < missing.length; i += 20) {
     await Promise.all(missing.slice(i, i + 20).map(async (b) => {
-      calls++;
+      calls.n++;
       t.set(b, Number((await up.call<{ timestamp: string }>("eth_getBlockByNumber", [hex(b), false])).timestamp));
     }));
   }
@@ -70,12 +71,12 @@ async function golive(): Promise<number> {
 }
 
 export async function promote(token: string, B0: number): Promise<{ status: string; transfers: number; note: string }> {
-  calls = 0;
+  const calls: Calls = { n: 0 };
   const t0 = Date.now();
   // Watch first: live ingest keeps the token's new transfers from its next context reload (15 s) on.
   await ch.insert({ table: "ctl_watchlists", values: [{ list: "promoted", kind: "token", value: token, keep_bits: KEEP.WATCH_TOKEN, version: Date.now() }], format: "JSONEachRow" });
   const ls: Log[] = [];
-  try { await logs(token, 0, B0 - 1, ls); }
+  try { await logs(token, 0, B0 - 1, ls, calls); }
   catch (e) {
     if (e instanceof TooBig) {
       await ch.insert({ table: "ctl_watchlists", values: [{ list: "promoted", kind: "token", value: token, keep_bits: KEEP.WATCH_TOKEN, removed: 1, version: Date.now() }], format: "JSONEachRow" });
@@ -84,7 +85,7 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
     throw e;
   }
   const erc20 = ls.filter((l) => l.topics.length === 3);
-  const tm = await times(erc20);
+  const tm = await times(erc20, calls);
   const rowsOut = erc20.map((l) => ({
     block: Number(l.blockNumber), tx_index: Number(l.transactionIndex), log_index: Number(l.logIndex), batch_index: 0,
     tx_hash: l.transactionHash.toLowerCase(), time: tm.get(Number(l.blockNumber)) ?? 0, token,
@@ -94,7 +95,8 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
   // kept_transfers is a ReplacingMergeTree: a retry rewrites the same keys. agg_balances sums, so it goes last, once,
   // with a deterministic dedup token (a retry within ClickHouse's dedup window is dropped), and is marked right after.
   for (let i = 0; i < rowsOut.length; i += INSERT_ROWS) await insert("kept_transfers", rowsOut.slice(i, i + INSERT_ROWS), `promote:${token}:${B0}:${i}`);
-  await new Promise((r) => setTimeout(r, 20_000)); // let ingest's context pick up the watch before copying the window
+  // Let ingest's context (reloaded every 15 s) pick up the watch before copying the window; the fetch counts toward it.
+  await new Promise((r) => setTimeout(r, Math.max(0, 20_000 - (Date.now() - t0))));
   await ch.command({ query: `INSERT INTO kept_transfers SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_TOKEN}) AS keep) FROM ev_transfers WHERE token = {t:String} AND block >= {b:UInt64}`, query_params: { t: token, b: B0 } });
   const bal = new Map<string, bigint>();
   for (const r of rowsOut) {
@@ -109,16 +111,19 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
   await projectTokens(up, [token], Number(tip.block), `promote:${token}`);
   const [s] = await rows<{ complete: number; minted: string; total_supply: string }>(
     "SELECT complete, toString(minted) AS minted, toString(total_supply) AS total_supply FROM serve_tokens FINAL WHERE token = {t:String}", { t: token });
-  const note = `${erc20.length} transfers, ${calls} calls, ${Math.round((Date.now() - t0) / 1000)} s`;
+  const note = `${erc20.length} transfers, ${calls.n} calls, ${Math.round((Date.now() - t0) / 1000)} s`;
   return s?.complete ? { status: "done", transfers: erc20.length, note } : { status: "incomplete", transfers: erc20.length, note: `${note}; minted ${s?.minted} ≠ supply ${s?.total_supply}` };
 }
 
 if (import.meta.main) {
   const B0 = await golive();
-  console.log(`[promoter] go-live block ${B0}; max ${MAX_TRANSFERS} transfers a token`);
-  for (;;) {
-    const [q] = await rows<{ token: string }>("SELECT token FROM ctl_promotions FINAL WHERE status = 'queued' ORDER BY queued_at LIMIT 1");
-    if (!q) { await new Promise((r) => setTimeout(r, 5_000)); continue; }
+  console.log(`[promoter] go-live block ${B0}; max ${MAX_TRANSFERS} transfers a token, ${CONCURRENCY} at a time`);
+  const busy = new Set<string>();
+  const worker = async () => { for (;;) {
+    const [q] = await rows<{ token: string }>(
+      "SELECT token FROM ctl_promotions FINAL WHERE status = 'queued' AND token NOT IN {busy:Array(String)} ORDER BY queued_at LIMIT 1", { busy: [...busy] });
+    if (!q || busy.has(q.token)) { await new Promise((r) => setTimeout(r, 2_000)); continue; }
+    busy.add(q.token);
     try {
       const r = await promote(q.token, B0);
       await setStatus(q.token, r.status, r.transfers, r.note);
@@ -127,5 +132,7 @@ if (import.meta.main) {
       await setStatus(q.token, "failed", 0, (e as Error).message.slice(0, 300));
       console.warn(`[promoter] ${q.token}: ${(e as Error).message}`);
     }
-  }
+    busy.delete(q.token);
+  } };
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 }
