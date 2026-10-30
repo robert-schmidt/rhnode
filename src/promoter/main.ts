@@ -12,9 +12,8 @@ import { upstream } from "../chain/upstream.ts";
 import { KEEP } from "../ingest/keep.ts";
 import { TRANSFER, topicAddr, word0 } from "../ingest/decode.ts";
 import { projectTokens } from "../projector/main.ts";
-import { walk, walkFloor } from "./walk.ts";
+import { history, walkFloor } from "./history.ts";
 import { walletWorker } from "./wallets.ts";
-import { scan } from "./scan.ts";
 
 /** Above this many transfers a token stays refused (WETH, USDG, stables): too big to hold for the gain. */
 const MAX_TRANSFERS = Number(process.env.PROMOTE_MAX_TRANSFERS ?? 500_000);
@@ -126,12 +125,10 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
 if (import.meta.main) {
   const B0 = await golive();
   console.log(`[promoter] go-live block ${B0}; max ${MAX_TRANSFERS} transfers a token, ${CONCURRENCY} at a time`);
-  void walletWorker(); // requested wallets (src/watch.ts) are indexed alongside the walk and token promotion
-  // The walk holds every token's history above its floor, so promotions wait for it, and afterwards fetch only below it.
-  if (process.env.WALK === "1") await walk(up, B0);
-  // Every wallet's txs below go-live, after the walk: both are bound by the node box's CPU, and the walk serves more
-  // (token holders, info and transfer history before go-live).
-  if (process.env.SCAN === "1") void scan(B0);
+  void walletWorker(); // requested wallets (src/watch.ts) are indexed alongside the history pass and token promotion
+  // The history pass holds every token's history above its floor, so promotions wait for it, and afterwards fetch
+  // only below it.
+  if (process.env.HISTORY === "1") await history(up, B0);
   const busy = new Set<string>();
   const worker = async () => { for (;;) {
     const [q] = await rows<{ token: string }>(

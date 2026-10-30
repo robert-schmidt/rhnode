@@ -17,7 +17,8 @@ No API keys, no paid providers. Runs on a 32 GB mini PC (measured: ~100 Mgas/s c
 | M1 tip ingest of every block → `raw_*` + decoded `ev_*` (transfers, swaps, pools, launches, Relay fills), keep bits, reorg rollback | ✅ |
 | M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices + 1m candles, wallet trades | in progress |
 | Token promotion: a token older than go-live gets its whole history once, on first request (`src/promoter`) | ✅ |
-| History walk: every ERC-20 transfer from go-live back to genesis on your own node (`WALK=1`), kept forever; exact wallet history and token balances | built, starts after sync |
+| History pass: every block from go-live back to genesis on your own node, read once and decoded by the ingest decoder (`HISTORY=1`); kept forever: ERC-20 transfers and balances, swaps, launches, pools, Relay fills, every wallet's txs and ETH transfers | built, starts after sync |
+| Prices, 1m candles and wallet trades before go-live, derived from what the history pass keeps (no further node reads) | next |
 | M3 API: `/rpc`, `/ws`, Blockscout-compatible `/api`, API keys (a separate service since 2026-10-30) | ✅ |
 | M4 `/v1/stream` with resume, watchlists | planned |
 | M5 `/v1` insights REST | planned |
@@ -89,7 +90,7 @@ here: ClickHouse `:8123`, Redis `:6379` and Nitro `:8547`/`:8548` are then publi
 the LAN, fail2ban, and the firewall unit installed.
 
 Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_blocks` from go-live), and the history floor
-(`ctl_cursors` `walk`, or go-live before the walk starts) say what can be answered exactly; anything older is "unknown".
+(`ctl_cursors` `walk`, the history pass's floor, or go-live before it starts) say what can be answered exactly; anything older is "unknown".
 
 ### Linux
 

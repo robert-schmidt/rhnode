@@ -18,21 +18,24 @@ that read the chain, and gives more insight than either.
 - **API split (2026-10-30):** the public API (/rpc, /ws, /api, /v1, /health) is a separate private service on an edge box.
   This stack publishes ClickHouse/Redis/Nitro on `NODE_BIND` (loopback by default) and `ops/firewall.sh` admits only
   `API_HOST`. Schema changes here must stay compatible with the API's pinned core commit until it bumps.
-- **Backward walk (changed 2026-10-30):** once our Nitro is synced, src/promoter also walks from go-live back to genesis,
-  newest first, at idle priority on the local node. It fills only what is kept forever (kept_transfers, agg_balances). The walk's
-  floor (`exactFrom` in /health) is where exact history starts. A refused wallet is promoted next and answered asynchronously
-  (503 "promotion queued" until done). This supersedes the rule below as the walk advances.
+- **History pass (changed 2026-10-30, Robert: "single pass with full decoding"):** once our Nitro is synced,
+  src/promoter/history.ts reads every block from go-live back to genesis once (block + all receipts), newest first, and
+  runs ingest's decoder over it. Migration 017's Null tables + views keep forever, with the live views' expressions:
+  wallet tx pointers, ETH edges, first txs, ERC-20 transfers, swaps, launches, pools, Relay fills, UserOperationEvents;
+  agg_balances is summed by the pass. It replaced the walk (Transfers only) and the scan (txs only): measured ~10% less
+  node work, and every event type. Concurrency adapts to ingest/node lag. Its floor is ctl_cursors 'walk' (`exactFrom`
+  in /health, token promotion's top) and 'scan' (explorer coverage). Prices/candles/trades before go-live are derived
+  afterwards from the kept rows (next). A refused wallet is answered asynchronously (503 "promotion queued").
 - **Wallet txs, all wallets (2026-10-30):** idx_wallet_txs points every wallet at its txs
-  (migration 015: from go-live by a view on raw_txs, below it by src/promoter/scan.ts, SCAN=1, one pass over our synced
-  node, ~25-30 h at SCAN_DUTY=1 with the receipts below, after the walk). The explorer reads txs through it (ClickHouse, else the node).
+  (migration 015: from go-live by a view on raw_txs, below it by the history pass). The explorer reads txs through it (ClickHouse, else the node).
 - **ETH funding graph (2026-10-30):** native_edges (+ native_edges_by_src) keep every top-level ETH transfer forever
-  (migration 016: from go-live by a view on raw_txs, below it by the same scan, which reads the receipts of value txs: a third
-  of them fail, and only transfers that happened are kept). path (in the key) leaves room for internal transfers (traces);
+  (migration 016: from go-live by a view on raw_txs, below it by the history pass; a third of value txs fail, and only
+  transfers that happened are kept). path (in the key) leaves room for internal transfers (traces);
   agg_native_src/dst hold hub stats per sender/recipient.
 - **Wallet index (2026-10-30):** full tx rows (kept_txs) forever only for wallets a request names (explorer pages, API
   params/paths, wallet RPC params; src/watch.ts → ctl_wallet_index). src/promoter/wallets.ts watches each (unless busier
   than WALLET_MAX_TXS_DAY) and copies its raw txs into kept_txs. Older rows come from the node through idx_wallet_txs.
-- **Data from go-live forward only** (until the walk runs). No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
+- **Data from go-live forward only** (until the history pass runs). No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
   of a pool that trades now) and **token promotion** (changed 2026-10-30, so apps can drop Blockscout): a token older than
   go-live is queued the first time the API refuses it, and src/promoter fetches its pre-go-live Transfer history once into
   kept_transfers + agg_balances (complete only if minted = totalSupply). Wallets stay go-live-forward only.
