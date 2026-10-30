@@ -69,5 +69,23 @@ sysctl -q --system
 install -m 644 ops/rhnode-firewall.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now rhnode-firewall.service
+
+# Optional CPU package power cap (POWER_W watts, both RAPL limits) at every boot, for a small box whose cooler can't
+# hold the firmware's limit: it then sits at Tjmax and throttles, which costs more than the cap does.
+if [ -n "${POWER_W:-}" ]; then
+  cat > /etc/systemd/system/rhnode-power.service <<EOF
+[Unit]
+Description=rhnode CPU package power cap (${POWER_W} W)
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo ${POWER_W}000000 > /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw'
+ExecStart=/bin/sh -c 'echo ${POWER_W}000000 > /sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw'
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable rhnode-power.service
+  systemctl restart rhnode-power.service
+fi
 ufw status verbose
 iptables -L RHNODE -n
