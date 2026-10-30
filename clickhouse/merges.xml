@@ -1,8 +1,13 @@
-<!-- Merge at least 10 parts at once. Ingest and the projector insert a small part into ~25 tables every second; with the
-     default (0) each new ~2 KB part was merged straight into the partition's ~1 MB part, rewriting it every second:
-     kept_native wrote 973 MB in 20 min to add 1.7 MB, ~30 GiB/h for the whole database (part_log, 2026-10-30). -->
+<!-- Merges: small new parts must merge with each other, not into the partition's big part.
+     Ingest and the projector insert a small part into ~25 tables every second. With the defaults each one was merged
+     straight into the partition's ~1-5 MB part, rewriting it every second: ~30 GiB/h (part_log, 2026-10-30 morning).
+     min_parts_to_merge_at_once = 10 alone didn't hold: on a scratch table (one 40K-row part, then 20 inserts of 6 rows)
+     it still made 12 two-part merges, each with the big part, and in production merges still wrote ~155 GiB/h at
+     2.0-2.6 parts per merge. With merge_selector_base = 20, the same probe made one merge of 17 small parts and left
+     the big part alone (2026-10-30, ClickHouse 26.3). A larger base keeps more parts per partition (~20 per size tier). -->
 <clickhouse>
     <merge_tree>
         <min_parts_to_merge_at_once>10</min_parts_to_merge_at_once>
+        <merge_selector_base>20</merge_selector_base>
     </merge_tree>
 </clickhouse>
