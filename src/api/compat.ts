@@ -40,7 +40,7 @@ async function windowed<T>(q: URLSearchParams, fullFrom: number, fetchPage: (lo:
 const promoState = new Map<string, { status: string; at: number }>();
 async function promotion(token: string, enqueue: boolean): Promise<string> {
   const c = promoState.get(token);
-  if (c && (["done", "skipped", "notoken"].includes(c.status) || Date.now() - c.at < 10_000)) return c.status;
+  if (c && (["done", "skipped", "notoken"].includes(c.status) || (Date.now() - c.at < 10_000 && (c.status || !enqueue)))) return c.status;
   const [r] = await rows<{ status: string }>("SELECT status FROM ctl_promotions FINAL WHERE token = {t:String}", { t: token });
   let status = r?.status ?? "";
   if (!status && enqueue) {
