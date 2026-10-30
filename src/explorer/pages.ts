@@ -4,6 +4,7 @@
 import { rows } from "../ch.ts";
 import { ago, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
 import { bare, lookup, methods } from "./names.ts";
+import { indexState, requested } from "../watch.ts";
 
 export type Rpc = (method: string, params: unknown[]) => Promise<{ result?: unknown; error?: { message: string } }>;
 export type Page = { status: number; title: string; body: Html; immutable?: boolean; redirect?: string; refresh?: number };
@@ -229,6 +230,10 @@ ${r.logs.map((l) => html`<details class="log"><summary><span class="muted">#${nu
 export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<Page> {
   const txb = /^\d{1,12}$/.test(q.get("txb") ?? "") ? Number(q.get("txb")) : 0;
   const tfb = /^\d{1,12}$/.test(q.get("tfb") ?? "") ? Number(q.get("tfb")) : 0;
+  requested(a);
+  const ix = await indexState(a);
+  // an indexed address has every tx since its floor in kept_txs; others only what raw_txs still holds
+  const src = ix.status === "indexed" ? "kept_txs FINAL" : "raw_txs";
   const [bal, code, [c], meta, txs, tfs] = await Promise.all([
     call<string>(rpc, "eth_getBalance", [a, "latest"]),
     call<string>(rpc, "eth_getCode", [a, "latest"]),
@@ -236,7 +241,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
       "SELECT kind, impl, deployer, block, created, fingerprint FROM contracts FINAL WHERE address = {a:String}", { a }),
     tokens([a]),
     rows<{ hash: string; block: string; from: string; to: string; v: string; selector: string; status: number; created: string; ts: number }>(
-      `SELECT hash, block, \`from\`, \`to\`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts FROM raw_txs
+      `SELECT hash, block, \`from\`, \`to\`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts FROM ${src}
        WHERE (\`from\` = {a:String} OR \`to\` = {a:String} OR created = {a:String}) AND sign = 1 ${txb ? "AND block < {txb:UInt64}" : ""}
        ORDER BY block DESC, tx_index DESC LIMIT 25`, { a, txb }),
     rows<{ tx_hash: string; block: string; token: string; from: string; to: string; amt: string; ts: number }>(
@@ -261,11 +266,11 @@ ${impl ? html`<dt>Implementation</dt><dd>${link("address", impl, impl)}</dd>` : 
 ${c?.deployer ? html`<dt>Deployed by</dt><dd>${link("address", c.deployer, c.deployer)} in block ${link("block", c.block)}</dd>` : ""}
 ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}</dl>
 ${token}
-<h2>Transactions <span class="muted small">(last 14 days)</span></h2>
+<h2>Transactions <span class="muted small">(${ix.status === "indexed" ? html`all since block ${link("block", String(ix.floor))}` : ix.status === "busy" ? "last 14 days: too busy to keep" : "last 14 days; indexing this address, kept from now on"})</span></h2>
 ${txs.length ? html`<div class="tw"><table><tr><th>Tx</th><th>Time (UTC)</th><th>Method</th><th>From → To</th><th>Value</th></tr>
 ${txs.map((t) => html`<tr${t.status ? "" : html` class="failed"`}><td>${link("tx", t.hash)}</td><td>${when(t.ts)}</td><td><span class="tag">${method(t.to || null, t.created ? "" : t.selector, names)}</span></td>
 <td>${t.from === a ? html`<b>self</b>` : link("address", t.from)} → ${t.created ? "new contract" : t.to === a ? html`<b>self</b>` : t.to ? link("address", t.to) : "—"}</td><td>${value(t.v)}</td></tr>`)}</table></div>
-${txs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?txb=${txs.at(-1)!.block}${tfb ? `&tfb=${tfb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None in the last 14 days.</p>`}
+${txs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?txb=${txs.at(-1)!.block}${tfb ? `&tfb=${tfb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None${ix.status === "indexed" ? "" : " in the last 14 days"}.</p>`}
 <h2>Token transfers <span class="muted small">(ERC-20, since our history starts)</span></h2>
 ${tfs.length ? html`<div class="tw"><table><tr><th>Tx</th><th>Time (UTC)</th><th>Token</th><th>From → To</th><th>Amount</th></tr>
 ${tfs.map((t) => { const m = tmeta.get(t.token); return html`<tr><td>${link("tx", t.tx_hash)}</td><td>${when(t.ts)}</td><td>${link("address", t.token, sym(m, t.token))}</td>

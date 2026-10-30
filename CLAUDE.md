@@ -22,6 +22,10 @@ that read the chain, and gives more insight than either.
   newest first, at idle priority on the local node. It fills only what is kept forever (kept_transfers, agg_balances). The walk's
   floor (`exactFrom` in /health) is where exact history starts. A refused wallet is promoted next and answered asynchronously
   (503 "promotion queued" until done). This supersedes the rule below as the walk advances.
+- **Wallet index (2026-10-30):** not every wallet, only those a request names (explorer pages, API params/paths, wallet
+  RPC params; src/watch.ts → ctl_wallet_index). src/promoter/wallets.ts watches each (unless busier than
+  WALLET_MAX_TXS_DAY) and copies its raw txs into kept_txs, so its txs live forever from `floor`. Below the oldest raw
+  block: a full-block scan on our node, once synced (not built yet).
 - **Data from go-live forward only** (until the walk runs). No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
   of a pool that trades now) and **token promotion** (changed 2026-10-30, so apps can drop Blockscout): a token older than
   go-live is queued the first time the API refuses it, and src/promoter fetches its pre-go-live Transfer history once into
