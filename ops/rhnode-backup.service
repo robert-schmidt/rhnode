@@ -1,0 +1,9 @@
+[Unit]
+Description=rhnode: dump the forever tables and mirror them off the box (ops/backup.sh)
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/bin/sh /srv/rhnode/ops/backup.sh
