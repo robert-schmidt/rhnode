@@ -24,10 +24,11 @@ that read the chain, and gives more insight than either.
   (503 "promotion queued" until done). This supersedes the rule below as the walk advances.
 - **Wallet txs, all wallets (2026-10-30):** idx_wallet_txs points every wallet at its txs
   (migration 015: from go-live by a view on raw_txs, below it by src/promoter/scan.ts, SCAN=1, one pass over our synced
-  node, ~15 h at SCAN_DUTY=1, after the walk). The explorer reads txs through it (ClickHouse, else the node).
+  node, ~25-30 h at SCAN_DUTY=1 with the receipts below, after the walk). The explorer reads txs through it (ClickHouse, else the node).
 - **ETH funding graph (2026-10-30):** native_edges (+ native_edges_by_src) keep every top-level ETH transfer forever
-  (migration 016: from go-live by a view on raw_txs, below it by the same scan). Scan rows have status 2 (unknown: a third
-  of value txs fail), so readers check them against the node. Internal transfers need traces.
+  (migration 016: from go-live by a view on raw_txs, below it by the same scan, which reads the receipts of value txs: a third
+  of them fail, and only transfers that happened are kept). path (in the key) leaves room for internal transfers (traces);
+  agg_native_src/dst hold hub stats per sender/recipient.
 - **Wallet index (2026-10-30):** full tx rows (kept_txs) forever only for wallets a request names (explorer pages, API
   params/paths, wallet RPC params; src/watch.ts → ctl_wallet_index). src/promoter/wallets.ts watches each (unless busier
   than WALLET_MAX_TXS_DAY) and copies its raw txs into kept_txs. Older rows come from the node through idx_wallet_txs.

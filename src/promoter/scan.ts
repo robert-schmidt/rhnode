@@ -1,11 +1,12 @@
 // The wallet scan (2026-10-30: one pass, all wallets). Our node is pruned and has no address index, so the
 // txs of a wallet before go-live are found only by reading every block. One pass, from go-live down to genesis, newest
 // first, writes a pointer for each tx's sender, recipient and created contract into idx_wallet_txs (migration 015), and
-// each tx that carries ETH into native_edges (migration 016, status 2: blocks don't say whether a tx failed).
+// each ETH transfer that happened into native_edges (migration 016: a value tx whose receipt says it succeeded).
 // ctl_cursors 'scan' is its floor: every wallet's txs from there on are indexed. It runs only while our node is synced
 // and ingest keeps up, and rests in proportion to its work, as the walk does (src/promoter/walk.ts).
 // Measured 2026-10-30 on the node box while Nitro was still syncing: 8×25 blocks in flight read ~1,880 blocks/s, so the
-// pass to genesis takes ~15 h of work (~30 h at the default duty).
+// pass to genesis takes ~15 h of work (~30 h at the default duty). The receipts of value txs add 60-100% (measured at
+// blocks 90M, 60M, 30M: +0.5-1.1 s per 2,000 blocks; 1.6-17% of those txs failed), so ~25-30 h at duty 1.
 import { getContractAddress } from "viem";
 import { ch, insert, rows } from "../ch.ts";
 import { watchNitro } from "../chain/nitro.ts";
@@ -17,10 +18,10 @@ const PAR = Number(process.env.SCAN_PAR ?? 8); // batches in flight
 const DUTY = Number(process.env.SCAN_DUTY ?? 0.5);
 const ARBOS = "0x6a"; // ArbOS's start-of-block tx: one in every block, always from the same address
 
-type Tx = { from: string; to: string | null; nonce: string; transactionIndex: string; type: string; value: string };
-type Block = { number: string; transactions: Tx[] };
+type Tx = { hash: string; from: string; to: string | null; nonce: string; transactionIndex: string; type: string; value: string };
+type Block = { number: string; timestamp: string; transactions: Tx[] };
 type Row = { wallet: string; block: number; tx_index: number };
-type Edge = { dst: string; src: string; value: string; block: number; tx_index: number; status: number };
+type Edge = { dst: string; src: string; value: string; block: number; tx_index: number; path: string; type: number; time: number };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const hex = (n: number) => "0x" + n.toString(16);
 
@@ -39,16 +40,31 @@ async function blocks(node: string, from: number, to: number): Promise<Block[]> 
   return j.map((x) => x.result!);
 }
 
+/** The value txs whose receipts say they succeeded. */
+async function succeeded(node: string, txs: { hash: string }[]): Promise<Set<string>> {
+  const ok = new Set<string>();
+  for (let i = 0; i < txs.length; i += 100) {
+    const req = txs.slice(i, i + 100).map((t, k) => ({ jsonrpc: "2.0", id: k, method: "eth_getTransactionReceipt", params: [t.hash] }));
+    const r = await fetch(node, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req), signal: AbortSignal.timeout(120_000) });
+    const j = (await r.json()) as { result?: { transactionHash: string; status: string } | null; error?: { message: string } }[];
+    const bad = Array.isArray(j) ? j.find((x) => !x.result) : null;
+    if (!Array.isArray(j) || bad) throw new Error(`receipts: ${bad?.error?.message ?? `HTTP ${r.status}`}`);
+    for (const x of j) if (x.result!.status === "0x1") ok.add(x.result!.transactionHash.toLowerCase());
+  }
+  return ok;
+}
+
 /** What a block gives: a pointer for each tx's sender, recipient and created contract (once each), and an edge for
- *  each tx that carries ETH (status 2: unknown). */
-export function pointers(b: Block): { rows: Row[]; edges: Edge[] } {
-  const block = Number(b.number), rows: Row[] = [], edges: Edge[] = [];
+ *  each tx that carries ETH (kept only if its receipt says it succeeded). */
+export function pointers(b: Block): { rows: Row[]; edges: (Edge & { hash: string })[] } {
+  const block = Number(b.number), time = Number(b.timestamp), rows: Row[] = [], edges: (Edge & { hash: string })[] = [];
   for (const t of b.transactions) {
     if (t.type === ARBOS) continue;
     const tx_index = Number(t.transactionIndex), from = t.from.toLowerCase();
     const created = t.to ? "" : getContractAddress({ from: t.from as `0x${string}`, nonce: BigInt(t.nonce) }).toLowerCase();
     for (const wallet of new Set([from, (t.to ?? "").toLowerCase(), created])) if (wallet) rows.push({ wallet, block, tx_index });
-    if (BigInt(t.value) > 0n) edges.push({ dst: t.to ? t.to.toLowerCase() : created, src: from, value: BigInt(t.value).toString(), block, tx_index, status: 2 });
+    if (BigInt(t.value) > 0n) edges.push({ dst: t.to ? t.to.toLowerCase() : created, src: from, value: BigInt(t.value).toString(), block, tx_index,
+      path: "", type: Number(t.type), time, hash: t.hash.toLowerCase() });
   }
   return { rows, edges };
 }
@@ -58,8 +74,11 @@ async function chunk(node: string, lo: number, hi: number): Promise<{ rows: Row[
   const parts: [number, number][] = [];
   for (let a = lo; a <= hi; a += BATCH) parts.push([a, Math.min(hi, a + BATCH - 1)]);
   const out = { rows: [] as Row[], edges: [] as Edge[] };
-  const work = async () => { for (let p = parts.shift(); p; p = parts.shift()) for (const b of await blocks(node, p[0], p[1])) {
-    const r = pointers(b); out.rows.push(...r.rows); out.edges.push(...r.edges);
+  const work = async () => { for (let p = parts.shift(); p; p = parts.shift()) {
+    const got = (await blocks(node, p[0], p[1])).map(pointers), maybe = got.flatMap((r) => r.edges);
+    const ok = await succeeded(node, maybe);
+    for (const r of got) out.rows.push(...r.rows);
+    for (const { hash, ...e } of maybe) if (ok.has(hash)) out.edges.push(e);
   } };
   await Promise.all(Array.from({ length: PAR }, work));
   return out;
