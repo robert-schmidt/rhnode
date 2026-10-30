@@ -10,7 +10,7 @@ import { ch, rows } from "../ch.ts";
 // ev_prices/ev_trades are written by the projector; rolled back the same way, and the projector cursor rewinds with it.
 const EV = ["ev_transfers", "ev_native", "ev_swaps", "ev_pools", "ev_launches", "ev_relay", "ev_prices", "ev_trades"];
 const RAW = ["raw_txs", "raw_logs"];
-const KEPT = ["kept_txs", "kept_logs", "kept_transfers", "kept_transfers_by_wallet", "kept_native", "kept_swaps", "kept_pools", "kept_launches", "kept_relay", "kept_trades"];
+const KEPT = ["kept_txs", "kept_logs", "kept_transfers", "kept_transfers_by_wallet", "kept_native", "kept_swaps", "kept_pools", "kept_launches", "kept_relay", "kept_trades", "contracts"];
 
 /** The highest block where our stored hash equals the chain's, scanning down from `from`. Blocks we never
  *  stored (already deleted by an interrupted rollback) are skipped. null = no match within `depth`. */

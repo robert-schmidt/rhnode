@@ -9,6 +9,7 @@ import { cfg } from "../config.ts";
 import { ch, insert, inSpan, rows, span } from "../ch.ts";
 import { MULTICALL3 } from "../chain/constants.ts";
 import { upstream, type Client } from "../chain/upstream.ts";
+import { deriveContracts } from "./contracts.ts";
 import { resolvePools } from "./pools.ts";
 import { derivePrices } from "./prices.ts";
 import { deriveTrades } from "./trades.ts";
@@ -135,8 +136,9 @@ if (import.meta.main) {
     const n = await project(up, last, to);
     const prices = await derivePrices(last, to);
     const trades = await deriveTrades(last, to);
+    const contracts = await deriveContracts(up, last, to);
     await ch.insert({ table: "ctl_cursors", values: [{ name: "projector", block: to, hash: "", version: Date.now() }], format: "JSONEachRow" });
-    console.log(JSON.stringify({ at: new Date().toISOString(), from: last + 1, to, tokens: n, pools, prices, trades, ms: Date.now() - t0 }));
+    console.log(JSON.stringify({ at: new Date().toISOString(), from: last + 1, to, tokens: n, pools, prices, trades, contracts, ms: Date.now() - t0 }));
     last = to;
   }
 }
