@@ -11,7 +11,7 @@ import { migrate } from "../migrate.ts";
 import { upstream, type Client } from "../chain/upstream.ts";
 import { decodeBlock, emptyRows, type RpcBlock, type RpcReceipt, type Rows } from "./decode.ts";
 import { learn, loadCtx, type KeepCtx } from "./keep.ts";
-import { findFork, rollback, storedHash } from "./reorg.ts";
+import { findFork, REORG_DEPTH, rollback, storedHash } from "./reorg.ts";
 import { BLOCKS, connect } from "../bus.ts";
 
 const hex = (n: number) => "0x" + n.toString(16);
@@ -108,7 +108,7 @@ async function tip(up: Client) {
       ahead.clear();
       if (!(e instanceof Reorg)) throw e;
       const fork = await findFork(next - 1, storedHash, async (n) => (await up.call<{ hash: string }>("eth_getBlockByNumber", [hex(n), false])).hash.toLowerCase());
-      if (fork === null) throw new Error(`${e.message}; no common block within 1000: stopping`);
+      if (fork === null) throw new Error(`${e.message}; no common block within ${REORG_DEPTH}: stopping`);
       const from = fork + 1 - ((fork + 1) % B); // re-ingest whole aligned batches
       console.warn(`[ingest] ${e.message}; fork at ${fork}, rolling back from ${from}`);
       await rollback(from, parent!);

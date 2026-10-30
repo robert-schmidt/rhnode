@@ -15,8 +15,11 @@ const KEPT = ["kept_txs", "kept_logs", "kept_transfers", "kept_transfers_by_wall
   "idx_wallet_txs", "native_edges", "native_edges_by_src"];
 
 /** The highest block where our stored hash equals the chain's, scanning down from `from`. Blocks we never
- *  stored (already deleted by an interrupted rollback) are skipped. null = no match within `depth`. */
-export async function findFork(from: number, stored: (n: number) => Promise<string | null>, chain: (n: number) => Promise<string>, depth = 1000): Promise<number | null> {
+ *  stored (already deleted by an interrupted rollback) are skipped. null = no match within `depth`.
+ *  The default reaches past "finalized" (~11,000 blocks behind the tip, measured 2026-10-30), below which nothing can
+ *  change. ponytail: a linear scan, one call a block (seconds on our node); bisect if deep reorgs ever happen. */
+export const REORG_DEPTH = 20_000;
+export async function findFork(from: number, stored: (n: number) => Promise<string | null>, chain: (n: number) => Promise<string>, depth = REORG_DEPTH): Promise<number | null> {
   for (let n = from; n > from - depth; n--) {
     const ours = await stored(n);
     if (ours !== null && ours === (await chain(n))) return n;

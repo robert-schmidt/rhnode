@@ -270,7 +270,9 @@ A bot's shortlist, held tokens, tracked pools and own wallets become watchlists.
 
 Keep `raw_blocks(number, hash, parent_hash)`. On a new block whose `parent_hash` doesn't match our stored hash at `n−1`:
 walk back to the fork point, re-insert every affected row with `sign = −1` (aggregates self-correct), and lightweight-`DELETE`
-those rows from raw/ev/kept (rare, so the cost is fine). Then ingest the new branch. Responses and stream messages carry
+those rows from raw/ev/kept (rare, so the cost is fine). Then ingest the new branch. The walk back reaches 20,000 blocks (src/ingest/reorg.ts
+`REORG_DEPTH`), past `finalized`: measured 2026-10-30, `safe` (the block's batch posted to L1) trails the tip by ~7,550 blocks
+(~13 min) and `finalized` by ~11,000 (~19 min). The parent-hash check catches a reorg of any depth on the next block. Responses and stream messages carry
 `finality: unsafe | safe | finalized` (Nitro exposes the `safe`/`finalized` tags). Consumers that move money (trading bots)
 can require `safe`.
 
