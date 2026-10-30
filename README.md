@@ -1,11 +1,13 @@
-# rhnode
+# rhnode: a self-hosted Robinhood Chain node and indexer
 
-A self-hosted **Robinhood Chain** (chain id 4663) indexer, optionally with its own Nitro node, built to back a data API.
-It follows the chain tip (from free public RPC endpoints, or your node), decodes everything into ClickHouse, and derives the
-facts trading apps usually buy from Alchemy or Blockscout: exact token balances and holders, pools, a price for
-every swap, 1-minute candles, and per-wallet trades with PnL inputs.
+Run your own **Robinhood Chain** (chain id 4663, an Arbitrum Orbit L2) **node and indexer** on one box: an **Arbitrum Nitro**
+node, ClickHouse and a TypeScript ingest in one `docker compose` stack. It follows the chain tip (from your node, or free
+public RPC endpoints without one), decodes everything into ClickHouse, and derives the facts trading apps usually buy from
+Alchemy or Blockscout: exact token balances and holders, every ERC-20 transfer back to genesis, pools, a price for every
+swap, 1-minute candles, and per-wallet trades with PnL inputs. It backs an Ethereum JSON-RPC, WebSocket and
+Etherscan/Blockscout-compatible API.
 
-No API keys, no paid providers. One `docker compose` stack.
+No API keys, no paid providers. Runs on a 32 GB mini PC (measured: ~100 Mgas/s catch-up at 18 W).
 
 ## What's built
 
