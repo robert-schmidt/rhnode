@@ -15,6 +15,8 @@ const FACTORY = parseAbi([
   "function getPair(address, address) view returns (address)",
   "function getPool(address, address, uint24) view returns (address)",
 ]);
+// Forks keyed by tick spacing (Slipstream-style CLFactory and others): getPool(token0, token1, int24 tickSpacing).
+const FACTORY_TS = parseAbi(["function getPool(address, address, int24) view returns (address)"]);
 const INITIALIZE = registryEntries.find((e) => e.key === "univ4:Initialize")!.topic0;
 const RETRY_FAILED_SEC = 3600;
 const V4_PER_TICK = 50;
@@ -55,6 +57,9 @@ async function resolveV23(up: Client, pools: { pool: string; venue: string }[]):
       ? { target: g.factory, abi: FACTORY, fn: "getPair", args: [g.token0, g.token1] }
       : { target: g.factory, abi: FACTORY, fn: "getPool", args: [g.token0, g.token1, g.fee] }));
     const vouched = new Map(ok.map((g, j) => [g.pool, lc(checks[j]) === g.pool]));
+    const byTs = ok.filter((g) => g.venue !== "v2" && !vouched.get(g.pool));
+    const ts = await multicall(up, byTs.map((g) => ({ target: g.factory, abi: FACTORY_TS, fn: "getPool", args: [g.token0, g.token1, g.tick_spacing] })));
+    byTs.forEach((g, j) => { if (lc(ts[j]) === g.pool) vouched.set(g.pool, true); });
     for (const g of got) {
       if (!vouched.has(g.pool)) { out.push(failed(g.pool, g.venue, g.pool)); continue; }
       out.push({
@@ -87,12 +92,12 @@ async function resolveV4(lookup: Client, p: { pool: string; manager: string }): 
   }
 }
 
-/** Resolve the pools that swapped in (from, to] and aren't known (or failed > an hour ago). */
+/** Resolve the pools that swapped in (from, to] and aren't known and verified (re-asked hourly otherwise). */
 export async function resolvePools(up: Client, lookup: Client, from: number, to: number): Promise<{ v23: number; v4: number; failed: number }> {
   const unknown = await rows<{ pool: string; venue: string; manager: string }>(
     `SELECT pool, any(venue) AS venue, any(emitter) AS manager FROM ev_swaps
      WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}
-       AND pool NOT IN (SELECT pool FROM pools FINAL WHERE ok = 1 OR version > {retry:UInt64})
+       AND pool NOT IN (SELECT pool FROM pools FINAL WHERE verified = 1 OR version > {retry:UInt64})
      GROUP BY pool`,
     { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000 },
   );
