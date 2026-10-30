@@ -52,6 +52,12 @@ export async function project(up: Client, from: number, to: number): Promise<num
     "SELECT DISTINCT token FROM ev_transfers WHERE block > {from:UInt64} AND block <= {to:UInt64} AND standard = 'erc20'",
     { from, to },
   )).map((r) => r.token);
+  await projectTokens(up, dirty, to, `${from}-${to}`);
+  return dirty.length;
+}
+
+/** Rewrite serve_tokens for these tokens as of block `to` (also used by the promoter after a backfill). */
+export async function projectTokens(up: Client, dirty: string[], to: number, tag: string): Promise<void> {
   for (let i = 0; i < dirty.length; i += CHUNK) {
     const chunk = dirty.slice(i, i + CHUNK);
     // ponytail: groups every holder of WETH/USDG each tick; a per-token holder count kept by an MV if this gets slow.
@@ -82,9 +88,8 @@ export async function project(up: Client, from: number, to: number): Promise<num
         complete: supply !== null && supply > 0n && BigInt(s.minted) === supply ? 1 : 0,
         block: to, version,
       };
-    }), `${from}-${to}:${i}`);
+    }), `${tag}:${i}`);
   }
-  return dirty.length;
 }
 
 const cursor = async (name: string) => Number((await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = {name:String}", { name }))[0]?.block ?? 0);

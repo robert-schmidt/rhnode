@@ -3,7 +3,7 @@
 // before our data, holders of a token older than go-live), the request is proxied to Blockscout if
 // BLOCKSCOUT_API_KEY is set, else answered 503, which clients read as "unknown" (never as "empty").
 import { cfg } from "../config.ts";
-import { rows } from "../ch.ts";
+import { insert, rows } from "../ch.ts";
 import { coverage } from "./coverage.ts";
 import { handle, up } from "./rpc.ts";
 
@@ -36,6 +36,25 @@ async function windowed<T>(q: URLSearchParams, fullFrom: number, fetchPage: (lo:
   return covered || got.length === offset ? got : null;
 }
 
+/** Queue a token older than go-live for promotion (src/promoter), once. Returns its promotion status ("" if none). */
+const promoState = new Map<string, { status: string; at: number }>();
+async function promotion(token: string, enqueue: boolean): Promise<string> {
+  const c = promoState.get(token);
+  if (c && (c.status === "done" || Date.now() - c.at < 10_000)) return c.status;
+  const [r] = await rows<{ status: string }>("SELECT status FROM ctl_promotions FINAL WHERE token = {t:String}", { t: token });
+  let status = r?.status ?? "";
+  if (!status && enqueue) {
+    await insert("ctl_promotions", [{ token, status: "queued", transfers: 0, note: "", version: Date.now() }], `queue:${token}`);
+    status = "queued";
+  }
+  promoState.set(token, { status, at: Date.now() });
+  return status;
+}
+const refused = (status: string) =>
+  status === "skipped" ? "too many transfers before rhnode started indexing to hold its history"
+  : status === "incomplete" || status === "failed" ? `history before rhnode started indexing: promotion ${status}`
+  : "history before rhnode started indexing is being fetched (promotion queued); ask again in a few minutes";
+
 type Tx = { block: string; ts: number; tx_hash: string; log_index: number; tx_index: number; token: string; from: string; to: string; amount: string; name: string | null; symbol: string | null; decimals: number | null };
 
 async function tokentx(q: URLSearchParams): Promise<Reply> {
@@ -43,6 +62,7 @@ async function tokentx(q: URLSearchParams): Promise<Reply> {
   if ((wallet && !ADDR.test(wallet)) || (token && !ADDR.test(token)) || (!wallet && !token)) return bad("address or contractaddress required");
   // A token whose every mint we saw, still fully in raw: its history is complete from block 0.
   let fullFrom = Infinity;
+  if (token && !wallet && (await promotion(token, false)) === "done") return tokentxKept(q, token);
   if (token && !wallet) {
     const [t] = await rows<{ complete: number; first: string }>(
       "SELECT (SELECT max(complete) FROM serve_tokens FINAL WHERE token = {t:String}) AS complete, (SELECT min(block) FROM ev_transfers WHERE token = {t:String}) AS first", { t: token });
@@ -55,14 +75,33 @@ async function tokentx(q: URLSearchParams): Promise<Reply> {
        ${token ? "AND t.token = {token:String}" : ""} ${wallet ? "AND (t.\`from\` = {wallet:String} OR t.\`to\` = {wallet:String})" : ""}
      ORDER BY t.block ${desc ? "DESC" : "ASC"}, t.log_index ${desc ? "DESC" : "ASC"}, t.batch_index LIMIT {limit:UInt32} OFFSET {skip:UInt32}
      SETTINGS join_use_nulls = 1`, { lo, hi, limit, skip, token: token ?? "", wallet: wallet ?? "" }));
-  if (!got) return fallback("/api", q, "this window starts before the data rhnode holds");
+  if (!got) return fallback("/api", q, token && !wallet ? refused(await promotion(token, true)) : "this window starts before the data rhnode holds");
+  return ok(await txRows(got));
+}
+
+/** A promoted token: its whole history is in kept_transfers (backfill + everything kept since). */
+async function tokentxKept(q: URLSearchParams, token: string): Promise<Reply> {
+  const cov = await coverage();
+  const lo = Number(q.get("startblock") ?? 0), hi = Math.min(Number(q.get("endblock") ?? 9e15), cov.ingested);
+  const page = Math.max(1, Number(q.get("page") ?? 1)), offset = Math.min(10_000, Math.max(1, Number(q.get("offset") ?? 10_000)));
+  const desc = q.get("sort") === "desc" ? "DESC" : "ASC";
+  const got = await rows<Tx>(
+    `SELECT t.block, toUnixTimestamp(t.time) AS ts, t.tx_hash, t.log_index, t.tx_index, t.token, t.\`from\` AS \`from\`, t.\`to\` AS \`to\`, toString(t.amount) AS amount, s.name, s.symbol, s.decimals
+     FROM (SELECT * FROM kept_transfers FINAL WHERE token = {token:String} AND standard = 'erc20' AND block BETWEEN {lo:UInt64} AND {hi:UInt64}) AS t
+     LEFT JOIN (SELECT token, name, symbol, decimals FROM serve_tokens FINAL WHERE token = {token:String}) AS s ON s.token = t.token
+     WHERE t.sign = 1 ORDER BY t.block ${desc}, t.log_index ${desc}, t.batch_index LIMIT {limit:UInt32} OFFSET {skip:UInt32}
+     SETTINGS join_use_nulls = 1`, { token, lo, hi, limit: offset, skip: (page - 1) * offset });
+  return ok(await txRows(got));
+}
+
+async function txRows(got: Tx[]) {
   const head = (await coverage()).ingested;
-  return ok(got.map((t) => ({
+  return got.map((t) => ({
     blockNumber: String(t.block), timeStamp: String(t.ts), hash: t.tx_hash, nonce: "", blockHash: "", from: t.from, to: t.to,
     contractAddress: t.token, value: t.amount, tokenName: t.name ?? "", tokenSymbol: t.symbol ?? "", tokenDecimal: t.decimals == null || t.decimals < 0 ? "" : String(t.decimals),
     transactionIndex: String(t.tx_index), logIndex: String(t.log_index), gas: "", gasPrice: "", gasUsed: "", cumulativeGasUsed: "", input: "deprecated",
     confirmations: String(Math.max(0, head - Number(t.block))),
-  })));
+  }));
 }
 
 type Txl = { block: string; ts: number; hash: string; tx_index: number; from: string; to: string; value: string; selector: string; input: string; status: number; gas_used: string; price: string; nonce: string; created: string };
@@ -89,7 +128,7 @@ async function holders(q: URLSearchParams): Promise<Reply> {
   if (!token || !ADDR.test(token)) return bad("contractaddress required");
   const page = Math.max(1, Number(q.get("page") ?? 1)), offset = Math.min(10_000, Math.max(1, Number(q.get("offset") ?? 100)));
   const [t] = await rows<{ complete: number }>("SELECT complete FROM serve_tokens FINAL WHERE token = {t:String}", { t: token });
-  if (!t?.complete) return fallback("/api", q, "holders are exact only for tokens minted since rhnode started indexing");
+  if (!t?.complete) return fallback("/api", q, refused(await promotion(token, true)));
   const hs = await rows<{ holder: string; b: string }>(
     `SELECT holder, toString(sum(balance) AS bal) AS b FROM agg_balances WHERE token = {t:String} AND holder != '0x0000000000000000000000000000000000000000'
      GROUP BY holder HAVING bal > 0 ORDER BY bal DESC, holder LIMIT {limit:UInt32} OFFSET {skip:UInt32}`, { t: token, limit: offset, skip: (page - 1) * offset });
@@ -177,8 +216,7 @@ export async function v2(path: string, q: URLSearchParams): Promise<Reply> {
   const [t] = await rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
     "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token = {t:String}",
     { t: m[1].toLowerCase() });
-  if (!t) return fallback(path, q, "token not seen since rhnode started indexing");
-  if (!t.complete) return fallback(path, q, "holder count is exact only for tokens minted since rhnode started indexing");
+  if (!t?.complete) return fallback(path, q, refused(await promotion(m[1].toLowerCase(), true)));
   return { status: 200, body: {
     address: t.token, address_hash: t.token, name: t.name, symbol: t.symbol, decimals: t.decimals < 0 ? null : String(t.decimals), total_supply: t.supply,
     holders_count: t.holders, holders: t.holders, type: "ERC-20", exchange_rate: null,

@@ -46,6 +46,17 @@ services:
     depends_on:
       clickhouse: { condition: service_healthy }
 
+  # Fetches the history of tokens older than go-live, once, when the API first has to refuse one (src/promoter).
+  promoter:
+    build: .
+    restart: unless-stopped
+    command: ["node", "src/promoter/main.ts"]
+    env_file: .env
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on:
+      clickhouse: { condition: service_healthy }
+
   api:
     build: .
     restart: unless-stopped

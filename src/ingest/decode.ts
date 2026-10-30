@@ -18,7 +18,7 @@ export type RpcReceipt = {
   contractAddress: string | null; logs: RpcLog[];
 };
 
-const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+export const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const TRANSFER_SINGLE = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62";
 const TRANSFER_BATCH = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb";
 const PAD = "0x000000000000000000000000";
@@ -27,8 +27,8 @@ const REGISTRY = new Set(registryEntries.map((e) => `${e.address}:${e.topic0}`))
 const num = (h: string | undefined | null) => (h ? Number(BigInt(h)) : 0);
 const big = (h: string | undefined | null) => (h && h !== "0x" ? BigInt(h).toString() : "0");
 /** First 32-byte word of `data`, 0 when empty (some tokens log `0x`). */
-const word0 = (data: string) => (data.length >= 66 ? BigInt(data.slice(0, 66)).toString() : "0");
-const topicAddr = (t: string | undefined) => (t && t.length === 66 ? "0x" + t.slice(26) : "");
+export const word0 = (data: string) => (data.length >= 66 ? BigInt(data.slice(0, 66)).toString() : "0");
+export const topicAddr = (t: string | undefined) => (t && t.length === 66 ? "0x" + t.slice(26) : "");
 const int24 = (w: string) => { const v = BigInt("0x" + w); return Number(v >= 1n << 255n ? v - (1n << 256n) : v); };
 const lc = (s: string) => s.toLowerCase();
 
