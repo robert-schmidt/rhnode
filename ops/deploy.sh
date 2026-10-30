@@ -8,6 +8,7 @@
 # Migrations run when ingest starts; they're additive, so a rollback leaves them in place.
 set -eu
 cd "$(dirname "$0")/.."
+exec 9>/tmp/rhnode-ops.lock; flock 9 # heal.sh waits for us
 INFRA=0; [ "${1:-}" = "--infra" ] && { INFRA=1; shift; }
 REF=${1:-origin/main}
 PORT=$(grep -s '^API_PORT=' .env | cut -d= -f2); PORT=${PORT:-8080}
