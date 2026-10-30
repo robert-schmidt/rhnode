@@ -75,12 +75,26 @@ async function cacheable(method: string, params: unknown[], result: unknown): Pr
 type LogFilter = { fromBlock?: string; toBlock?: string; address?: string | string[]; topics?: (string | string[] | null)[]; blockHash?: string };
 
 /** From ClickHouse when [from, to] lies inside raw coverage; otherwise (or for blockHash/tags) the upstreams. */
+// A range that ends just past `ingested` (clients ask up to the head; we run ~1 s behind) waits for ingest instead
+// of going upstream, where ranges and 1,000+ OR'd topics are refused.
+const WAIT_BLOCKS = 300, WAIT_MS = 3_000;
+export const logStats = { waited: 0, caughtUp: 0, upstream: 0 };
+
 async function getLogs(f: LogFilter): Promise<RpcReply> {
   if (!f || typeof f !== "object") return err(-32602, "missing filter");
-  const cov = await coverage();
+  let cov = await coverage();
+  const want = isHex(f.toBlock) ? Number(f.toBlock) : 0;
+  if (want > cov.ingested && want - cov.ingested <= WAIT_BLOCKS) {
+    logStats.waited++;
+    for (const until = Date.now() + WAIT_MS; want > cov.ingested && Date.now() < until; ) {
+      await new Promise((r) => setTimeout(r, 200));
+      cov = await coverage(150);
+    }
+    if (want <= cov.ingested) logStats.caughtUp++;
+  }
   const from = isHex(f.fromBlock) ? Number(f.fromBlock) : f.fromBlock === undefined || f.fromBlock === "latest" ? cov.ingested : NaN;
   const to = isHex(f.toBlock) ? Number(f.toBlock) : f.toBlock === undefined || f.toBlock === "latest" ? cov.ingested : NaN;
-  if (f.blockHash || !(from >= cov.rawFrom && to <= cov.ingested && from <= to)) return up.forward("eth_getLogs", [f]);
+  if (f.blockHash || !(from >= cov.rawFrom && to <= cov.ingested && from <= to)) { logStats.upstream++; return up.forward("eth_getLogs", [f]); }
   const p: Record<string, unknown> = { from, to };
   const where = ["l.block BETWEEN {from:UInt64} AND {to:UInt64}", "l.sign = 1"];
   const addrs = (Array.isArray(f.address) ? f.address : f.address ? [f.address] : []).map((a) => a.toLowerCase());

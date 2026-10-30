@@ -6,7 +6,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { cfg } from "../config.ts";
 import { BLOCKS, connect } from "../bus.ts";
-import { handle } from "./rpc.ts";
+import { handle, logStats } from "./rpc.ts";
 import type { RpcReply } from "../chain/upstream.ts";
 import { v1, v2 } from "./compat.ts";
 import { coverage } from "./coverage.ts";
@@ -61,10 +61,29 @@ async function body(req: http.IncomingMessage): Promise<string> {
 
 // /health (no key): whether clients should use rhnode right now, and for what. 503 when not ok, so a plain
 // status check is enough; the fields let a client decide per subsystem (e.g. every eth_call only when node = "nitro").
-const NODE = cfg.upstreamHttp.some((u) => /\/\/nitro[:/]/.test(u.url)) ? "nitro" : "public";
+const NITRO = process.env.NITRO_HTTP ?? ""; // our node, when the stack runs one (probed even before /rpc uses it)
+const NITRO_ROUTED = cfg.upstreamHttp.some((u) => /\/\/nitro[:/]/.test(u.url));
 const MAX_LAG_BLOCKS = 600; // ~1 min at ~104 ms blocks
 const MAX_STREAM_AGE_S = 30;
+const NITRO_SYNCED_BLOCKS = 50;
 let lastBlockAt = 0;
+
+// Nitro's head against the sequencer's (the official RPC), every 10 s. `nitroSince`: when it last became synced.
+const nitro = { head: null as number | null, behind: null as number | null, since: 0 };
+async function headOf(url: string): Promise<number> {
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}', signal: AbortSignal.timeout(3_000) });
+  return Number(((await r.json()) as { result: string }).result);
+}
+async function probeNitro() {
+  try {
+    const [n, ref] = await Promise.all([headOf(NITRO), headOf(cfg.api.sendHttp[0].url)]);
+    nitro.head = n; nitro.behind = Math.max(0, ref - n);
+  } catch { nitro.head = nitro.behind = null; }
+  const synced = nitro.behind != null && nitro.behind <= NITRO_SYNCED_BLOCKS;
+  if (!synced) nitro.since = 0; else if (!nitro.since) nitro.since = Date.now();
+}
+if (NITRO) { void probeNitro(); setInterval(probeNitro, 10_000); }
+
 async function health() {
   const c = await coverage();
   const head: RpcReply = await handle("eth_blockNumber").catch((e: Error) => ({ error: { code: -1, message: e.message } }));
@@ -74,7 +93,10 @@ async function health() {
   const upstream = !head.error, index = lag != null && lag <= MAX_LAG_BLOCKS, stream = streamAgeS != null && streamAgeS <= MAX_STREAM_AGE_S;
   return {
     ok: upstream && index && stream,
-    node: NODE, // "nitro": our own node answers /rpc; "public": /rpc proxies the free endpoints (rate-shared)
+    // "nitro": /rpc is served by our own node and it's synced; "public": /rpc proxies the free endpoints (rate-shared)
+    node: NITRO_ROUTED && nitro.since ? "nitro" : "public",
+    nitroSinceS: NITRO_ROUTED && nitro.since ? Math.round((Date.now() - nitro.since) / 1000) : null,
+    nitroHead: nitro.head, nitroBehind: nitro.behind,
     upstream, index, stream,
     head: headN, ingested: c.ingested, lagBlocks: lag, streamAgeS,
     rawFrom: Number.isFinite(c.rawFrom) ? c.rawFrom : null,
@@ -171,7 +193,7 @@ if (bus) {
 
 setInterval(() => {
   if (!stats.size) return;
-  console.log(JSON.stringify({ at: new Date().toISOString(), ws: conns.size, calls: Object.fromEntries(stats) }));
+  console.log(JSON.stringify({ at: new Date().toISOString(), ws: conns.size, calls: Object.fromEntries(stats), getLogs: logStats }));
   stats.clear();
 }, 60_000);
 

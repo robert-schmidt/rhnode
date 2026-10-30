@@ -56,7 +56,7 @@ Each key gets `API_RPS` requests/s (default 200; WebSocket notifications don't c
 | `wss /ws` | the same JSON-RPC plus `eth_subscribe` `newHeads` and `logs` (any address/topic sets, no caps), fed by ingest (~2 s behind the block timestamp) |
 | `GET /api?module=…&action=…` | Etherscan/Blockscout v1: `token.getTokenHolders`, `account.tokentx`, `account.txlist`, `account.balance(multi)`, `logs.getLogs`, `block.eth_block_number` |
 | `GET /api/v2/tokens/{address}` | Blockscout v2 token card (name, symbol, decimals, total supply, holder count) |
-| `GET /health` | `{ok, node, upstream, index, stream, head, ingested, lagBlocks, streamAgeS, rawFrom}`; HTTP 503 when `ok` is false (upstream down, index >600 blocks behind, or no block on the stream for 30 s). `node: "nitro"` means `/rpc` is served by our own node; `"public"` means it proxies the free endpoints |
+| `GET /health` | `{ok, node, upstream, index, stream, head, ingested, lagBlocks, streamAgeS, rawFrom}`; HTTP 503 when `ok` is false (upstream down, index >600 blocks behind, or no block on the stream for 30 s). `node: "nitro"` means `/rpc` is served by our own node and it is within 50 blocks of the sequencer, for `nitroSinceS` seconds; `"public"` means it proxies the free endpoints. `nitroHead`/`nitroBehind`: the node's sync, when the stack runs one. `eth_getLogs` ending up to 300 blocks past `ingested` waits up to 3 s for ingest instead of going upstream |
 
 Answers are exact or refused, never partial: a window that starts before the indexed data, or holders of a token
 minted before indexing began, return **HTTP 503** (clients treat it as "unknown"), or are proxied to Blockscout when
