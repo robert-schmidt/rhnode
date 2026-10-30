@@ -1,0 +1,32 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { html, page, units } from "./html.ts";
+import { route } from "./index.ts";
+
+const XSS = `"><script>alert(1)</script><img src=x onerror=alert(1)>`;
+
+test("chain and request data come out escaped", () => {
+  const out = page(XSS, html`<p>${XSS}</p><a href="/x/${XSS}">${[XSS, XSS]}</a>`, { q: XSS });
+  assert.ok(!out.includes("<script>alert") && !out.includes("<img src=x"));
+  assert.equal(out.split("&lt;script&gt;").length - 1, 6);
+});
+
+test("units", () => {
+  assert.equal(units(1234567890000000000000n, 18), "1,234.56789");
+  assert.equal(units(1n, 18), "<0.000001");
+  assert.equal(units("-1500000", 6), "-1.5");
+  assert.equal(units(42n, 0), "42");
+});
+
+test("route validates before anything is queried", () => {
+  const q = new URLSearchParams();
+  for (const bad of ["/block/1e9", "/block/0x12", "/tx/0xzz", `/tx/${encodeURIComponent(XSS)}`, "/address/0x123"])
+    assert.equal((route(bad, q) as { key: string }).key, "/404", bad);
+  assert.equal(route("/nope", q), null);
+  assert.equal((route("/block/00042", q) as { key: string }).key, "/block/42");
+  const A = "0x" + "Ab".repeat(20);
+  assert.deepEqual(route(`/address/${A}`, q), { redirect: `/address/${A.toLowerCase()}` });
+  assert.deepEqual(route(`/address/${A.toLowerCase()}`, new URLSearchParams("txb=5&evil=<x>")), { redirect: `/address/${A.toLowerCase()}?txb=5` });
+  assert.equal((route(`/address/${A.toLowerCase()}`, new URLSearchParams("txb=5")) as { key: string }).key, `/address/${A.toLowerCase()}?txb=5`);
+  assert.equal((route("/search", new URLSearchParams({ q: "x".repeat(500) })) as { q: string }).q.length, 100);
+});
