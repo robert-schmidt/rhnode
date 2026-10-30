@@ -26,7 +26,7 @@ done
 echo "$(date -u +%T) unpacking into $CHAIN/nitro"
 mkdir -p "$CHAIN/nitro"
 cat $(echo "$parts" | cut -d' ' -f1) | tar -x -C "$CHAIN/nitro"
-chown -R 1000:1000 "$CHAIN"   # the nitro-node image runs as uid 1000
+chown -R 1000:1000 "$CHAIN"; chown 1000:1000 "$(dirname "$CHAIN")"   # the image runs as uid 1000 and writes jwtsecret to the volume root
 touch "$CHAIN/.snapshot-$ID"
 rm -f full-path.tar.part*
 echo "$(date -u +%T) done: $ID"
