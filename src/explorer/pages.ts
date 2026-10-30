@@ -254,6 +254,43 @@ async function nodeTx(rpc: Rpc, n: number, i: number): Promise<WTx> {
   return { hash: t.hash, block: String(n), tx_index: i, from: t.from.toLowerCase(), to: (t.to ?? "").toLowerCase(), v: BigInt(t.value).toString(),
     selector: t.input.length >= 10 ? t.input.slice(0, 10).toLowerCase() : "", status: num(r.status), created: (r.contractAddress ?? "").toLowerCase(), ts: num(blk.timestamp) };
 }
+type Edge = { peer: string; v: string; block: string; tx_index: number; type: number; ts: number };
+type Side = { edges: number; wallets: number; wei: string };
+const BRIDGE: Record<number, string> = { 100: "L1 deposit", 104: "retryable", 105: "retryable" };
+const EDGE_COLS = "toString(value) AS v, block, tx_index, type, toUnixTimestamp(time) AS ts";
+const SIDE = (t: string, k: string) => `SELECT uniqMerge(n) AS edges, uniqMerge(peers) AS wallets, toString(sum(total)) AS wei FROM ${t} WHERE ${k} = {a:String}`;
+
+/** The wallet's ETH funding (migration 016, transfers that happened): its first funders with how many wallets each
+ *  funded (a funder of thousands is an exchange, solver or bridge), the first wallets it funded, and both sides' totals. */
+async function funding(rpc: Rpc, a: string) {
+  const [first, funded, [inSide], [outSide]] = await Promise.all([
+    rows<Edge>(`SELECT src AS peer, ${EDGE_COLS} FROM native_edges FINAL WHERE dst = {a:String} ORDER BY block, tx_index, path LIMIT 5`, { a }),
+    rows<Edge>(`SELECT dst AS peer, ${EDGE_COLS} FROM native_edges_by_src FINAL WHERE src = {a:String} ORDER BY block, tx_index, path LIMIT 10`, { a }),
+    rows<Side>(SIDE("agg_native_dst", "dst"), { a }),
+    rows<Side>(SIDE("agg_native_src", "src"), { a }),
+  ]);
+  const srcs = [...new Set(first.map((e) => e.peer))];
+  const [hubs, hash] = await Promise.all([
+    srcs.length ? rows<{ src: string; w: number }>("SELECT src, uniqMerge(peers) AS w FROM agg_native_src WHERE src IN {s:Array(String)} GROUP BY src", { s: srcs }) : [],
+    txHashes(rpc, [...first, ...funded]),
+  ]);
+  return { first, funded, inSide, outSide, hubs: new Map(hubs.map((h) => [h.src, Number(h.w)])), hash };
+}
+
+/** Hashes of (block, tx_index) pairs: ClickHouse, else the node. */
+async function txHashes(rpc: Rpc, ps: { block: string; tx_index: number }[]): Promise<Map<string, string>> {
+  if (!ps.length) return new Map();
+  const b = [...new Set(ps.map((p) => p.block))];
+  const m = new Map((await rows<{ block: string; tx_index: number; hash: string }>(
+    `SELECT block, tx_index, hash FROM raw_txs WHERE block IN {b:Array(UInt64)} UNION ALL SELECT block, tx_index, hash FROM kept_txs WHERE block IN {b:Array(UInt64)}`, { b }))
+    .map((r) => [`${r.block}:${r.tx_index}`, r.hash]));
+  await Promise.all(ps.filter((p) => !m.has(`${p.block}:${p.tx_index}`)).map(async (p) => {
+    const t = await call<{ hash: string } | null>(rpc, "eth_getTransactionByBlockNumberAndIndex", ["0x" + Number(p.block).toString(16), "0x" + p.tx_index.toString(16)]).catch(() => null);
+    if (t) m.set(`${p.block}:${p.tx_index}`, t.hash);
+  }));
+  return m;
+}
+
 /** Where every address's txs are indexed from (0: all of them): the scan's floor, or go-live before it starts. */
 async function txsFrom(): Promise<{ from: number; scan: number | null; golive: number }> {
   const [r] = await rows<{ scan: string; golive: string; has_scan: number }>(
@@ -266,7 +303,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
   const txb = /^\d{1,12}$/.test(q.get("txb") ?? "") ? Number(q.get("txb")) : 0;
   const tfb = /^\d{1,12}$/.test(q.get("tfb") ?? "") ? Number(q.get("tfb")) : 0;
   requested(a);
-  const [bal, code, [c], meta, txs, cov, tfs] = await Promise.all([
+  const [bal, code, [c], meta, txs, cov, tfs, fund] = await Promise.all([
     call<string>(rpc, "eth_getBalance", [a, "latest"]),
     call<string>(rpc, "eth_getCode", [a, "latest"]),
     rows<{ kind: string; impl: string; deployer: string; block: string; created: number; fingerprint: string }>(
@@ -277,6 +314,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
     rows<{ tx_hash: string; block: string; token: string; from: string; to: string; amt: string; ts: number }>(
       `SELECT tx_hash, block, token, \`from\`, \`to\`, toString(amount) AS amt, toUnixTimestamp(time) AS ts FROM kept_transfers_by_wallet FINAL
        WHERE wallet = {a:String} ${tfb ? "AND block < {tfb:UInt64}" : ""} ORDER BY block DESC, log_index DESC LIMIT 25`, { a, tfb }),
+    funding(rpc, a),
   ]);
   const tok = meta.get(a), isContract = code !== "0x";
   // the contracts feed starts at its migration: an older proxy is read from its EIP-1967 slot
@@ -296,6 +334,10 @@ ${impl ? html`<dt>Implementation</dt><dd>${link("address", impl, impl)}</dd>` : 
 ${c?.deployer ? html`<dt>Deployed by</dt><dd>${link("address", c.deployer, c.deployer)} in block ${link("block", c.block)}</dd>` : ""}
 ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}</dl>
 ${token}
+<h2>ETH funding <span class="muted small">(direct transfers that happened, ${cov.from ? html`since block ${link("block", String(cov.from))}` : "all"}; not ETH sent by contracts)</span></h2>
+<dl><dt>Received</dt><dd>${side(fund.inSide, "from")}</dd><dt>Sent</dt><dd>${side(fund.outSide, "to")}</dd></dl>
+${fund.first.length ? html`<h3>First funders</h3>${edges(fund.first, fund.hash, (e) => html`${link("address", e.peer)}${fund.hubs.get(e.peer) ? html` <span class="muted small">funded ${fund.hubs.get(e.peer)!.toLocaleString("en-US")} wallets</span>` : ""}`)}` : ""}
+${fund.funded.length ? html`<h3>First wallets it funded</h3>${edges(fund.funded, fund.hash, (e) => link("address", e.peer))}` : ""}
 <h2>Transactions <span class="muted small">(${cov.from ? html`all since block ${link("block", String(cov.from))}` : "all"})</span></h2>
 ${cov.from ? html`<p class="loading"><span class="spin"></span> ${cov.scan == null
   ? html`Older ones (before block ${cov.from}) are indexed once our node has finished syncing.`
@@ -310,6 +352,13 @@ ${tfs.map((t) => { const m = tmeta.get(t.token); return html`<tr><td>${link("tx"
 <td>${t.from === a ? html`<b>self</b>` : link("address", t.from)} → ${t.to === a ? html`<b>self</b>` : link("address", t.to)}</td><td>${m ? units(t.amt, m.decimals) : t.amt}</td></tr>`; })}</table></div>
 ${tfs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?tfb=${tfs.at(-1)!.block}${txb ? `&txb=${txb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None.</p>`}` };
 }
+
+const side = (x: Side | undefined, dir: string) => (Number(x?.edges ?? 0)
+  ? html`${eth(x!.wei)} in ${Number(x!.edges).toLocaleString("en-US")} transfers ${dir} ${Number(x!.wallets).toLocaleString("en-US")} wallets <span class="muted small">(approximate counts)</span>`
+  : html`<span class="muted">none</span>`);
+const edges = (es: Edge[], hash: Map<string, string>, who: (e: Edge) => Html | string) => html`<div class="tw"><table><tr><th>Tx</th><th>Time (UTC)</th><th>Address</th><th>Value</th></tr>
+${es.map((e) => { const h = hash.get(`${e.block}:${e.tx_index}`); return html`<tr><td>${h ? link("tx", h) : link("block", e.block)}</td><td>${when(e.ts)}</td>
+<td>${who(e)}${BRIDGE[e.type] ? html` <span class="tag">${BRIDGE[e.type]}</span>` : ""}</td><td>${value(e.v)}</td></tr>`; })}</table></div>`;
 
 async function tokenSection(t: string, tok: Token): Promise<Html> {
   const [holders, pools] = await Promise.all([
