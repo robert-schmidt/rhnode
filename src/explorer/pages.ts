@@ -9,6 +9,8 @@ export type Rpc = (method: string, params: unknown[]) => Promise<{ result?: unkn
 export type Page = { status: number; title: string; body: Html; immutable?: boolean; redirect?: string };
 
 const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const ZERO = "0x" + "0".repeat(40);
+const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"; // EIP-1967
 const DEEP = 64; // blocks below the head that we treat as final
 const big = (h: unknown) => BigInt((h as string) || "0x0");
 const num = (h: unknown) => Number(big(h));
@@ -51,7 +53,7 @@ export async function home(): Promise<Page> {
   ]);
   const names = await lookup(txs.map((t) => t.selector));
   const tps = st && st.s > 0 ? (Number(st.n) / st.s).toFixed(1) : "?";
-  return { status: 200, title: "Robinhood Chain explorer", body: html`
+  return { status: 200, title: "Latest blocks and transactions", body: html`
 <h1>Robinhood Chain</h1>
 <div class="stats"><div><b>${head.toLocaleString("en-US")}</b><span>latest block</span></div><div><b>${tps}</b><span>tx/s (last minute)</span></div>
 <div><b>~0.1 s</b><span>block time</span></div></div>
@@ -120,7 +122,7 @@ export async function tx(rpc: Rpc, hash: string): Promise<Page> {
 <dt>From</dt><dd>${link("address", t.from, t.from)}</dd>
 <dt>To</dt><dd>${t.to ? link("address", t.to, t.to) : r.contractAddress ? html`${link("address", r.contractAddress, r.contractAddress)} (created)` : "—"}</dd>
 <dt>Method</dt><dd><span class="tag">${t.to ? method(t.input, names) : "create"}</span> ${names.get(t.input.slice(0, 10).toLowerCase()) ? html`<span class="muted mono small">${names.get(t.input.slice(0, 10).toLowerCase())}</span>` : ""}</dd>
-<dt>Value</dt><dd>${eth(big(t.value))}</dd><dt>Fee</dt><dd>${eth(fee)}</dd>
+<dt>Value</dt><dd>${eth(big(t.value))}</dd><dt>Fee</dt><dd>${units(fee, 18, 12)} ETH</dd>
 <dt>Gas used</dt><dd>${num(r.gasUsed).toLocaleString("en-US")} of ${num(t.gas).toLocaleString("en-US")}</dd><dt>Nonce</dt><dd>${num(t.nonce)}</dd></dl>
 ${transfers.length ? html`<h2>Token transfers</h2><table><tr><th>Token</th><th>From</th><th>To</th><th>Amount</th></tr>
 ${transfers.map((l) => { const a = l.address.toLowerCase(), m = meta.get(a); return html`<tr><td>${link("address", a, sym(m, a))}</td><td>${link("address", addr(l.topics[1]))}</td>
@@ -151,6 +153,10 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
        WHERE wallet = {a:String} ${tfb ? "AND block < {tfb:UInt64}" : ""} ORDER BY block DESC, log_index DESC LIMIT 25`, { a, tfb }),
   ]);
   const tok = meta.get(a), isContract = code !== "0x";
+  // the contracts feed starts at its migration: an older proxy is read from its EIP-1967 slot
+  const impl = c?.impl || (isContract && code.length < 4000
+    ? ((s) => (/^0x0*$/.test(s) ? "" : "0x" + s.slice(-40)))(await call<string>(rpc, "eth_getStorageAt", [a, IMPL_SLOT, "latest"]).catch(() => "0x"))
+    : "");
   const [tmeta, names, token] = await Promise.all([
     tokens(tfs.map((t) => t.token)), lookup(txs.map((t) => t.selector)), tok ? tokenSection(a, tok) : Promise.resolve(html``),
   ]);
@@ -159,7 +165,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
 <h1>${title}</h1><p class="mono wrap">${a}</p>
 <dl><dt>Balance</dt><dd>${eth(big(bal))}</dd>
 <dt>Type</dt><dd>${isContract ? html`Contract${c?.kind ? html` <span class="tag">${c.kind}</span>` : ""}` : "Account (EOA)"}</dd>
-${c?.impl ? html`<dt>Implementation</dt><dd>${link("address", c.impl, c.impl)}</dd>` : ""}
+${impl ? html`<dt>Implementation</dt><dd>${link("address", impl, impl)}</dd>` : ""}
 ${c?.deployer ? html`<dt>Deployed by</dt><dd>${link("address", c.deployer, c.deployer)} in block ${link("block", c.block)}</dd>` : ""}
 ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}</dl>
 ${token}
@@ -178,8 +184,8 @@ ${tfs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?tfb=${tfs.a
 async function tokenSection(t: string, tok: Token): Promise<Html> {
   const [holders, pools] = await Promise.all([
     rows<{ holder: string; bal: string }>(
-      `SELECT holder, toString(sum(balance)) AS bal FROM agg_balances WHERE token = {t:String} GROUP BY holder HAVING sum(balance) > 0
-       ORDER BY sum(balance) DESC LIMIT 20`, { t }),
+      `SELECT holder, toString(sum(balance)) AS bal FROM agg_balances WHERE token = {t:String} AND holder != {z:String} GROUP BY holder HAVING sum(balance) > 0
+       ORDER BY sum(balance) DESC LIMIT 20`, { t, z: ZERO }),
     rows<{ pl: string; v: string; q: string; vol: number; hk: string; vf: number }>(
       `SELECT c.pool AS pl, toString(p.venue) AS v, c.q AS q, c.vol AS vol, p.hooks AS hk, p.verified AS vf
        FROM (SELECT pool, any(quote) AS q, sum(volume_usd) AS vol FROM agg_candles_1m WHERE token = {t:String} AND minute > now() - INTERVAL 1 DAY GROUP BY pool) AS c
