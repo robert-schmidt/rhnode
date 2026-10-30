@@ -3,7 +3,8 @@
 // first, writes a pointer for each tx's sender, recipient and created contract into idx_wallet_txs (migration 015).
 // ctl_cursors 'scan' is its floor: every wallet's txs from there on are indexed. It runs only while our node is synced
 // and ingest keeps up, and rests in proportion to its work, as the walk does (src/promoter/walk.ts).
-// Measured 2026-10-30 (16 curl workers, full blocks): ~450 blocks/s, so ~2.5 days to genesis.
+// Measured 2026-10-30 on the node box while Nitro was still syncing: 8×25 blocks in flight read ~1,880 blocks/s, so the
+// pass to genesis takes ~15 h of work (~30 h at the default duty).
 import { getContractAddress } from "viem";
 import { ch, insert, rows } from "../ch.ts";
 import { watchNitro } from "../chain/nitro.ts";

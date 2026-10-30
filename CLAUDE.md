@@ -24,7 +24,7 @@ that read the chain, and gives more insight than either.
   (503 "promotion queued" until done). This supersedes the rule below as the walk advances.
 - **Wallet txs, all wallets (2026-10-30):** idx_wallet_txs points every wallet at its txs
   (migration 015: from go-live by a view on raw_txs, below it by src/promoter/scan.ts, SCAN=1, one pass over our synced
-  node, ~2.5 days). The explorer reads txs through it (ClickHouse, else the node).
+  node, ~30 h). The explorer reads txs through it (ClickHouse, else the node).
 - **Wallet index (2026-10-30):** full tx rows (kept_txs) forever only for wallets a request names (explorer pages, API
   params/paths, wallet RPC params; src/watch.ts → ctl_wallet_index). src/promoter/wallets.ts watches each (unless busier
   than WALLET_MAX_TXS_DAY) and copies its raw txs into kept_txs. Older rows come from the node through idx_wallet_txs.
