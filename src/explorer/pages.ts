@@ -202,7 +202,7 @@ async function tokenSection(t: string, tok: Token): Promise<Html> {
 ${chart.length ? html`<dt>Price</dt><dd>${usd(chart.at(-1)!.c)}</dd>` : ""}</dl>
 ${best ? html`<h3>Price, last 7 days <span class="muted small">(hourly close, pool ${short(best.pl)})</span></h3>${sparkline(chart.map((r) => [r.h, r.c]))}` : ""}
 ${pools.length ? html`<h3>Pools (24 h)</h3><table><tr><th>Pool</th><th>Venue</th><th>Quote</th><th>Volume</th><th></th></tr>
-${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${link("address", p.q)}</td><td>${usd(p.vol)}</td>
+${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${p.q === ZERO ? "ETH" : link("address", p.q)}</td><td>${usd(p.vol)}</td>
 <td>${p.vf ? "" : html`<span class="bad small">unverified</span>`} ${p.hk && !/^0x0*$/.test(p.hk) ? html`<span class="tag">hook</span>` : ""}</td></tr>`)}</table>` : ""}
 ${holders.length ? html`<h3>Top holders</h3><table><tr><th>Holder</th><th>Balance</th><th>Share</th></tr>
 ${holders.map((h) => html`<tr><td>${link("address", h.holder)}</td><td>${units(h.bal, tok.decimals, 2)}</td><td>${supply > 0n ? `${(Number((BigInt(h.bal) * 10000n) / supply) / 100).toFixed(2)}%` : ""}</td></tr>`)}</table>` : ""}`;
