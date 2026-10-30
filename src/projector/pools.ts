@@ -1,7 +1,7 @@
 // Pool identity for pools that trade now but were created before go-live (§4.2). Never trusts the swap
 // emitter's own word: v2/v3 answers are checked against the factory, v4 pools come from their Initialize log.
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type Abi } from "viem";
-import { insert, rows } from "../ch.ts";
+import { insert, inSpan, rows, span } from "../ch.ts";
 import { MULTICALL3 } from "../chain/constants.ts";
 import { registryEntries } from "../chain/registry.ts";
 import type { Client } from "../chain/upstream.ts";
@@ -91,10 +91,10 @@ async function resolveV4(lookup: Client, p: { pool: string; manager: string }): 
 export async function resolvePools(up: Client, lookup: Client, from: number, to: number): Promise<{ v23: number; v4: number; failed: number }> {
   const unknown = await rows<{ pool: string; venue: string; manager: string }>(
     `SELECT pool, any(venue) AS venue, any(emitter) AS manager FROM ev_swaps
-     WHERE block > {from:UInt64} AND block <= {to:UInt64}
+     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}
        AND pool NOT IN (SELECT pool FROM pools FINAL WHERE ok = 1 OR version > {retry:UInt64})
      GROUP BY pool`,
-    { from, to, retry: Date.now() - RETRY_FAILED_SEC * 1000 },
+    { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000 },
   );
   const v23 = await resolveV23(up, unknown.filter((u) => u.venue !== "v4"));
   const v4 = await Promise.all(unknown.filter((u) => u.venue === "v4").slice(0, V4_PER_TICK).map((u) => resolveV4(lookup, u)));

@@ -6,7 +6,7 @@
 // ponytail: no Redis cards yet; the API (M3) reads serve_tokens and adds a cache if p95 needs it.
 import { decodeFunctionResult, encodeFunctionData, parseAbi } from "viem";
 import { cfg } from "../config.ts";
-import { ch, insert, rows } from "../ch.ts";
+import { ch, insert, inSpan, rows, span } from "../ch.ts";
 import { MULTICALL3 } from "../chain/constants.ts";
 import { upstream, type Client } from "../chain/upstream.ts";
 import { resolvePools } from "./pools.ts";
@@ -49,8 +49,8 @@ type Stats = { token: string; holder_count: string; top10: string; minted: strin
 
 export async function project(up: Client, from: number, to: number): Promise<number> {
   const dirty = (await rows<{ token: string }>(
-    "SELECT DISTINCT token FROM ev_transfers WHERE block > {from:UInt64} AND block <= {to:UInt64} AND standard = 'erc20'",
-    { from, to },
+    `SELECT DISTINCT token FROM ev_transfers WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND standard = 'erc20'`,
+    { from, to, ...await span(from, to) },
   )).map((r) => r.token);
   await projectTokens(up, dirty, to, `${from}-${to}`);
   return dirty.length;

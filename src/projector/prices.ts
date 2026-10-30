@@ -1,6 +1,6 @@
 // Swap → price (migrations/004_prices.sql). v3/v4 price is the pool's price AFTER the swap (sqrtPriceX96);
 // v2 has no price word, so it is the swap's execution price (fee included).
-import { insert, rows } from "../ch.ts";
+import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 export const QUOTE_DECIMALS: Record<string, number> = { [USDG]: 6, [WETH]: 18, [NATIVE_ETH]: 18 };
@@ -58,9 +58,9 @@ export async function derivePrices(from: number, to: number): Promise<number> {
     `SELECT s.block, s.tx_index, s.log_index, s.tx_hash, s.time, s.venue, s.pool, toString(s.amount0) AS a0, toString(s.amount1) AS a1,
        toString(s.sqrt_price_x96) AS sqrt, s.tx_from, p.token0, p.token1, p.verified
      FROM ev_swaps AS s INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE ok = 1
-       AND pool IN (SELECT pool FROM ev_swaps WHERE block > {from:UInt64} AND block <= {to:UInt64})) AS p USING pool
-     WHERE s.block > {from:UInt64} AND s.block <= {to:UInt64} AND s.sign = 1 ORDER BY s.block, s.log_index`,
-    { from, to },
+       AND pool IN (SELECT pool FROM ev_swaps WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})) AS p USING pool
+     WHERE s.block > {from:UInt64} AND s.block <= {to:UInt64} AND ${inSpan("s.time")} AND s.sign = 1 ORDER BY s.block, s.log_index`,
+    { from, to, ...await span(from, to) },
   );
   const tokens = [...new Set(swaps.flatMap((s) => [s.token0, s.token1]))].filter((t) => !(t in QUOTE_DECIMALS));
   const decimals = new Map((await rows<{ token: string; decimals: number }>(

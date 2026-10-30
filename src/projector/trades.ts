@@ -8,7 +8,7 @@
 // - a Relay fill: the recipient (they paid on another chain; ev_relay says how much in USDG/WETH).
 // A trade needs both: a priced swap of the token in the actor's segment AND a net change in the actor's own
 // balance of it. A router or solver moving tokens for someone else changes nothing of its own and isn't a trade.
-import { insert, rows } from "../ch.ts";
+import { insert, inSpan, rows, span } from "../ch.ts";
 import { USDG } from "../chain/constants.ts";
 
 export const USER_OP_EVENT = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
@@ -49,16 +49,16 @@ export function tradesOfTx(signer: string, transfers: Transfer[], prices: Price[
 
 /** Trades for every tx in (from, to] with a priced swap, plus Relay fills. */
 export async function deriveTrades(from: number, to: number): Promise<number> {
-  const r = { from, to };
+  const r = { from, to, ...await span(from, to) };
   const txs = await rows<{ block: string; tx_index: number; tx_hash: string; time: string; signer: string; keep: number }>(
     `SELECT block, tx_index, hash AS tx_hash, time, \`from\` AS signer, keep FROM raw_txs
-     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64})`, r);
+     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})`, r);
   const byTx = <T extends { tx_hash: string }>(xs: T[]) => {
     const m = new Map<string, T[]>();
     for (const x of xs) (m.get(x.tx_hash) ?? m.set(x.tx_hash, []).get(x.tx_hash)!).push(x);
     return m;
   };
-  const inRange = "block > {from:UInt64} AND block <= {to:UInt64} AND tx_hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64})";
+  const inRange = `block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND tx_hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})`;
   const transfers = byTx(await rows<Transfer & { tx_hash: string }>(
     `SELECT tx_hash, log_index, token, \`from\`, \`to\`, toString(amount) AS amount FROM ev_transfers WHERE standard = 'erc20' AND sign = 1 AND ${inRange}`, r));
   const prices = byTx(await rows<Price & { tx_hash: string }>(
@@ -75,10 +75,12 @@ export async function deriveTrades(from: number, to: number): Promise<number> {
     }
   }
   // Relay fills: the recipient bought, paid in USDG and/or WETH on the solver's side.
-  const ethUsd = Number((await rows<{ p: number }>("SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND eth_usd > 0 ORDER BY block DESC LIMIT 1", r))[0]?.p ?? 0);
+  // The last day first (a day partition or two instead of all of raw), then everything.
+  const lastEthUsd = (bound: string) => rows<{ p: number }>(`SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND eth_usd > 0 ${bound} ORDER BY block DESC LIMIT 1`, r);
+  const ethUsd = Number(((await lastEthUsd("AND time >= toDateTime({t1:UInt32}) - INTERVAL 1 DAY"))[0] ?? (await lastEthUsd(""))[0])?.p ?? 0);
   for (const f of await rows<{ block: string; tx_index: number; tx_hash: string; time: string; recipient: string; token: string; amount: string; usdg_in: string; weth_in: string; keep: number }>(
     `SELECT block, tx_index, tx_hash, time, recipient, token, toString(amount) AS amount, toString(usdg_in) AS usdg_in, toString(weth_in) AS weth_in, keep
-     FROM ev_relay WHERE block > {from:UInt64} AND block <= {to:UInt64} AND sign = 1`, r)) {
+     FROM ev_relay WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND sign = 1`, r)) {
     const eth = Number(f.weth_in) / 1e18;
     out.push({ block: f.block, tx_index: f.tx_index, tx_hash: f.tx_hash, time: f.time, wallet: f.recipient, token: f.token, side: "buy",
       amount: f.amount, usd: Number(f.usdg_in) / 1e6 + eth * ethUsd, eth, via: "relay", keep: f.keep, sign: 1 });
