@@ -2,14 +2,12 @@
 // Requests are validated by route() before anything is queried; rendered pages are cached in memory (a page of a final
 // block or tx for a day, live pages for seconds) and concurrent misses for one page share one render. Each client IP
 // gets a token bucket for cache misses only, so a cached page costs nothing; nginx limits raw request rates in front.
-import { readFileSync } from "node:fs";
 import type http from "node:http";
-import { html, page, REPO, type Html } from "./html.ts";
+import { CSS, CSS_PATH, html, page, REPO, type Html } from "./html.ts";
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
 import { address, block, home, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
 
-const CSS = readFileSync(new URL("./style.css", import.meta.url));
 const SECURITY = {
   "content-security-policy": "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
@@ -78,8 +76,8 @@ async function render(r: Exclude<Route, null | { redirect: string }>, rpc: Rpc):
 
 /** Serves the request and returns true when the path is an explorer page; false leaves it to the API. */
 export async function explorer(req: http.IncomingMessage, res: http.ServerResponse, url: URL, rpc: Rpc): Promise<boolean> {
-  if (url.pathname === "/static/style.css") {
-    res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=3600", ...SECURITY });
+  if (url.pathname === CSS_PATH || url.pathname === "/static/style.css") {
+    res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": url.pathname === CSS_PATH ? "public, max-age=31536000, immutable" : "no-cache", ...SECURITY });
     res.end(CSS); return true;
   }
   if (url.pathname === "/robots.txt") {

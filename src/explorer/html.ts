@@ -1,5 +1,11 @@
 // HTML for the explorer: every interpolated value is escaped unless it is already Html (built by `html` or `raw`),
 // so a page can only contain markup we wrote. Formatters are pure.
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+/** The stylesheet, served at a content-hashed URL so a new version never meets a cached old one. */
+export const CSS = readFileSync(new URL("./style.css", import.meta.url));
+export const CSS_PATH = `/static/style.${createHash("sha256").update(CSS).digest("hex").slice(0, 10)}.css`;
 
 export class Html { readonly s: string; constructor(s: string) { this.s = s; } toString() { return this.s; } }
 const ESC: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -24,7 +30,7 @@ export const REPO = "https://github.com/robert-schmidt/rhnode";
 export function page(title: string, body: Html, opts: { q?: string } = {}): string {
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title} · Robinhood Chain explorer</title><link rel="stylesheet" href="/static/style.css">
+<title>${title} · Robinhood Chain explorer</title><link rel="stylesheet" href="${CSS_PATH}">
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
 <body><header><a class="brand" href="/">rh<span>node</span> explorer</a>
 <form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off"><button>Search</button></form></header>
