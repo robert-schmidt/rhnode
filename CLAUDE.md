@@ -16,7 +16,11 @@ that read the chain, and gives more insight than either.
   Every config-dependent behavior goes behind a setting, never a fork in the code.
 - One docker compose stack (`--profile node` adds Nitro), named volumes (no bind mounts for data), nothing published except
   the API on `127.0.0.1:${API_PORT}`; a reverse proxy in front decides who reaches it.
-- **Data from go-live forward only.** No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
+- **Backward walk (changed 2026-10-30):** once our Nitro is synced, src/promoter also walks from go-live back to genesis,
+  newest first, at idle priority on the local node. It fills only what is kept forever (kept_transfers, agg_balances). The walk's
+  floor (`exactFrom` in /health) is where exact history starts. A refused wallet is promoted next and answered asynchronously
+  (503 "promotion queued" until done). This supersedes the rule below as the walk advances.
+- **Data from go-live forward only** (until the walk runs). No genesis backfill. The only lookups into the past are pool identities (tokens/fee/hooks
   of a pool that trades now) and **token promotion** (changed 2026-10-30, so apps can drop Blockscout): a token older than
   go-live is queued the first time the API refuses it, and src/promoter fetches its pre-go-live Transfer history once into
   kept_transfers + agg_balances (complete only if minted = totalSupply). Wallets stay go-live-forward only.
