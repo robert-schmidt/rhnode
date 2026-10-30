@@ -54,6 +54,7 @@ services:
     env_file: .env
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
+      NITRO_HTTP: http://nitro:8547 # the history walk (WALK=1) reads our own node only
     depends_on:
       clickhouse: { condition: service_healthy }
 

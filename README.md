@@ -15,6 +15,7 @@ No API keys, no paid providers. One `docker compose` stack.
 | M1 tip ingest of every block → `raw_*` + decoded `ev_*` (transfers, swaps, pools, launches, Relay fills), keep bits, reorg rollback | ✅ |
 | M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices + 1m candles, wallet trades | in progress |
 | Token promotion: a token older than go-live gets its whole history once, on first request (`src/promoter`) | ✅ |
+| History walk: every ERC-20 transfer from go-live back to genesis on your own node (`WALK=1`), kept forever; exact wallet history and token balances | built, starts after sync |
 | M3 API: `/rpc`, `/ws`, Blockscout-compatible `/api`, API keys | ✅ |
 | M4 `/v1/stream` with resume, watchlists | planned |
 | M5 `/v1` insights REST | planned |
@@ -87,8 +88,9 @@ Each key gets `API_RPS` requests/s (default 200; WebSocket notifications don't c
 | `wss /ws` | the same JSON-RPC plus `eth_subscribe` `newHeads` and `logs` (any address/topic sets, no caps), fed by ingest (~2 s behind the block timestamp) |
 | `GET /api?module=…&action=…` | Etherscan/Blockscout v1: `token.getTokenHolders`, `account.tokentx`, `account.txlist`, `account.balance(multi)`, `logs.getLogs`, `block.eth_block_number`, `contract.getsourcecode` (from Sourcify; 503 when Sourcify has no match, since Blockscout may still have it verified) |
 | `GET /api/v2/tokens/{address}` | Blockscout v2 token card (name, symbol, decimals, total supply, holder count) |
+| `GET /api/v2/addresses/{address}/token-balances` | Blockscout v2: every ERC-20 the wallet holds now (`[{token, value, token_id}]`). 503 until the history walk has reached genesis (`exactFrom: 0`) |
 | `GET /v1/wallets/{address}/first` | `{wallet, firstTx: {block, timeStamp, hash, nonce} \| null, born, dataFrom}`: the first tx it sent that rhnode saw (kept forever). `born: "exact"` (nonce 0, its real first tx), `"before"` (it sent txs before `dataFrom`), `"unknown"` (no tx sent since then) |
-| `GET /health` | `{ok, node, upstream, index, stream, head, ingested, lagBlocks, streamAgeS, rawFrom}`; HTTP 503 when `ok` is false (upstream down, index >600 blocks behind, or no block on the stream for 30 s). `node: "nitro"` means `/rpc` is served by our own node and it is within 50 blocks of the sequencer, for `nitroSinceS` seconds; `"public"` means it proxies the free endpoints. `nitroHead`/`nitroBehind`: the node's sync, when the stack runs one. `eth_getLogs` ending up to 300 blocks past `ingested` waits up to 3 s for ingest instead of going upstream |
+| `GET /health` | `{ok, node, upstream, index, stream, head, ingested, lagBlocks, streamAgeS, rawFrom, exactFrom}`; `exactFrom`: every ERC-20 transfer from that block on is held (`account.tokentx` below `rawFrom` reads them), going down to 0 as the walk runs; HTTP 503 when `ok` is false (upstream down, index >600 blocks behind, or no block on the stream for 30 s). `node: "nitro"` means `/rpc` is served by our own node and it is within 50 blocks of the sequencer, for `nitroSinceS` seconds; `"public"` means it proxies the free endpoints. `nitroHead`/`nitroBehind`: the node's sync, when the stack runs one. `eth_getLogs` ending up to 300 blocks past `ingested` waits up to 3 s for ingest instead of going upstream |
 
 Answers are exact or refused, never partial: a window that starts before the indexed data, or holders of a token
 minted before indexing began, return **HTTP 503** (clients treat it as "unknown"), or are proxied to Blockscout when

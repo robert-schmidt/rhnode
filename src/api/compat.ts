@@ -24,8 +24,9 @@ async function fallback(path: string, q: URLSearchParams, why: string): Promise<
 
 /** A paged window [start, end] is exact when it lies inside raw coverage, or (newest first) when the page fills up
  *  before the window leaves coverage. `fullFrom`: the entity's whole history is held from that block on. */
-async function windowed<T>(q: URLSearchParams, fullFrom: number, fetchPage: (lo: number, hi: number, desc: boolean, limit: number, skip: number) => Promise<T[]>) {
-  const cov = await coverage();
+async function windowed<T>(q: URLSearchParams, fullFrom: number, fetchPage: (lo: number, hi: number, desc: boolean, limit: number, skip: number) => Promise<T[]>, dataFrom?: number) {
+  const cov = { ...(await coverage()) };
+  if (dataFrom != null) cov.rawFrom = dataFrom;
   const start = Number(q.get("startblock") ?? 0), end = Number(q.get("endblock") ?? 9e15);
   const page = Math.max(1, Number(q.get("page") ?? 1)), offset = Math.min(10_000, Math.max(1, Number(q.get("offset") ?? 10_000)));
   const desc = q.get("sort") === "desc";
@@ -63,20 +64,25 @@ async function tokentx(q: URLSearchParams): Promise<Reply> {
   if ((wallet && !ADDR.test(wallet)) || (token && !ADDR.test(token)) || (!wallet && !token)) return bad("address or contractaddress required");
   // History from block 0 is held for a promoted token, or one launched inside the raw window (its whole life is in raw).
   // Not "complete" balances: those only say the supply was 0 at go-live, not that nothing happened before (wRDDT).
+  // Below the raw window the same query reads kept_transfers, which holds every ERC-20 transfer from exactFrom on.
   let fullFrom = Infinity;
   if (token && !wallet && (await promotion(token, false)) === "done") return tokentxKept(q, token);
+  const cov = await coverage();
+  const kept = Number(q.get("startblock") ?? 0) < cov.rawFrom && cov.exactFrom != null;
   if (token && !wallet) {
     const [t] = await rows<{ launched: string }>("SELECT min(block) AS launched FROM kept_launches WHERE token = {t:String} AND kind = 'launch'", { t: token });
-    if (Number(t?.launched) && Number(t.launched) >= (await coverage()).rawFrom) fullFrom = 0;
+    if (Number(t?.launched) && Number(t.launched) >= (kept ? cov.exactFrom! : cov.rawFrom)) fullFrom = 0;
   }
+  if (kept && cov.exactFrom === 0) fullFrom = 0;
   const got = await windowed<Tx>(q, fullFrom, (lo, hi, desc, limit, skip) => rows<Tx>(
     `SELECT t.block, toUnixTimestamp(t.time) AS ts, t.tx_hash, t.log_index, t.tx_index, t.token, t.\`from\` AS \`from\`, t.\`to\` AS \`to\`, toString(t.amount) AS amount, s.name, s.symbol, s.decimals
-     FROM ev_transfers AS t LEFT JOIN (SELECT token, name, symbol, decimals FROM serve_tokens FINAL) AS s ON s.token = t.token
+     FROM ${kept ? "kept_transfers FINAL" : "ev_transfers"} AS t LEFT JOIN (SELECT token, name, symbol, decimals FROM serve_tokens FINAL) AS s ON s.token = t.token
      WHERE t.standard = 'erc20' AND t.sign = 1 AND t.block BETWEEN {lo:UInt64} AND {hi:UInt64}
        ${token ? "AND t.token = {token:String}" : ""} ${wallet ? "AND (t.\`from\` = {wallet:String} OR t.\`to\` = {wallet:String})" : ""}
      ORDER BY t.block ${desc ? "DESC" : "ASC"}, t.log_index ${desc ? "DESC" : "ASC"}, t.batch_index LIMIT {limit:UInt32} OFFSET {skip:UInt32}
-     SETTINGS join_use_nulls = 1`, { lo, hi, limit, skip, token: token ?? "", wallet: wallet ?? "" }));
-  if (!got) return fallback("/api", q, token && !wallet ? refused(await promotion(token, true)) : "this window starts before the data rhnode holds");
+     SETTINGS join_use_nulls = 1`, { lo, hi, limit, skip, token: token ?? "", wallet: wallet ?? "" }), kept ? cov.exactFrom! : undefined);
+  if (!got) return fallback("/api", q, token && !wallet ? refused(await promotion(token, true))
+    : cov.exactFrom != null ? `rhnode holds exact history from block ${cov.exactFrom} (the walk to genesis is under way)` : "this window starts before the data rhnode holds");
   return ok(await txRows(got));
 }
 
@@ -228,7 +234,28 @@ export async function v1(q: URLSearchParams): Promise<Reply> {
   }
 }
 
+// GET /api/v2/addresses/{a}/token-balances in Blockscout's shape: every ERC-20 the wallet holds now. Exact only once the
+// walk has reached genesis (a wallet may hold tokens it last touched before the walk's floor); refused until then.
+// ponytail: balances are sums of Transfers; a rebasing token's balanceOf drifts from them (a balanceOf multicall if one matters).
+async function tokenBalances(path: string, q: URLSearchParams, w: string): Promise<Reply> {
+  const { exactFrom } = await coverage();
+  if (exactFrom !== 0) return fallback(path, q, `a wallet's token balances are exact once the walk to genesis is done (exact from block ${exactFrom ?? "?"} now)`);
+  const got = await rows<{ token: string; value: string; name: string | null; symbol: string | null; decimals: number | null; holders: string | null }>(
+    `SELECT b.token, toString(b.v) AS value, s.name, s.symbol, s.decimals, toString(s.holder_count) AS holders
+     FROM (SELECT token, sum(balance) AS v FROM agg_balances WHERE holder = {w:String} GROUP BY token HAVING v > 0) AS b
+     LEFT JOIN (SELECT token, name, symbol, decimals, holder_count FROM serve_tokens FINAL
+                WHERE token IN (SELECT token FROM agg_balances WHERE holder = {w:String})) AS s ON s.token = b.token
+     ORDER BY b.token SETTINGS join_use_nulls = 1`, { w });
+  return { status: 200, body: got.map((t) => ({
+    token: { address: t.token, address_hash: t.token, name: t.name, symbol: t.symbol, decimals: t.decimals == null || t.decimals < 0 ? null : String(t.decimals),
+      type: "ERC-20", holders_count: t.holders, holders: t.holders, exchange_rate: null },
+    token_id: null, token_instance: null, value: t.value,
+  })) };
+}
+
 export async function v2(path: string, q: URLSearchParams): Promise<Reply> {
+  const tb = path.match(/^\/api\/v2\/addresses\/(0x[0-9a-fA-F]{40})\/token-balances$/);
+  if (tb) return tokenBalances(path, q, tb[1].toLowerCase());
   const m = path.match(/^\/api\/v2\/tokens\/(0x[0-9a-fA-F]{40})$/);
   if (!m) return fallback(path, q, `${path} isn't served by rhnode`);
   const [t] = await rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(

@@ -84,6 +84,8 @@ async function health() {
     upstream, index, stream,
     head: headN, ingested: c.ingested, lagBlocks: lag, streamAgeS,
     rawFrom: Number.isFinite(c.rawFrom) ? c.rawFrom : null,
+    // every ERC-20 transfer from here on is held (go-live, then the walk's floor down to 0); absent until known
+    ...(c.exactFrom != null ? { exactFrom: c.exactFrom } : {}),
   };
 }
 

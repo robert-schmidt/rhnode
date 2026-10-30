@@ -6,7 +6,7 @@ import { LP_LOCKERS, RELAY_CONTRACTS } from "../chain/constants.ts";
 import { tokenSideOf } from "../chain/registry.ts";
 
 export const KEEP = {
-  WATCH_WALLET: 1, WATCH_TOKEN: 2, LAUNCH: 4, TRACKED_POOL: 8, RELAY: 16, LOCKS: 32, PINNED: 64, OWN: 128, UNRECOVERABLE: 256,
+  WATCH_WALLET: 1, WATCH_TOKEN: 2, LAUNCH: 4, TRACKED_POOL: 8, RELAY: 16, LOCKS: 32, PINNED: 64, OWN: 128, UNRECOVERABLE: 256, HISTORY: 512,
 } as const;
 
 const PINKLOCK = "0xbe0b139abc90723af76a89d3051f60ba1b64c8d9";
