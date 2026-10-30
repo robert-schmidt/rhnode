@@ -35,11 +35,16 @@ async function fetchBlock(up: Client, n: number): Promise<[RpcBlock, RpcReceipt[
 /** Fetch, decode and insert blocks from..to (one aligned batch). `parent` = hash expected as block from's parent. */
 export class Reorg extends Error {}
 
-export async function runBatch(up: Client, from: number, to: number, ctx: KeepCtx, parent: string | null) {
-  let fetched = await Promise.all(Array.from({ length: to - from + 1 }, (_, i) => fetchBlock(up, from + i)));
+type Fetched = [RpcBlock, RpcReceipt[]][];
+const fetchRange = (up: Client, from: number, to: number): Promise<Fetched> =>
+  Promise.all(Array.from({ length: to - from + 1 }, (_, i) => fetchBlock(up, from + i)));
+
+/** `pre`: the batch's blocks already being fetched (the tip loop reads ahead while it is behind). */
+export async function runBatch(up: Client, from: number, to: number, ctx: KeepCtx, parent: string | null, pre?: Promise<Fetched>) {
+  let fetched = await (pre ?? fetchRange(up, from, to));
   // Blocks fetched in parallel can straddle a reorg: refetch once before believing a broken chain.
   const linked = () => fetched.every(([b], i) => i === 0 || b.parentHash.toLowerCase() === fetched[i - 1][0].hash.toLowerCase());
-  if (!linked()) fetched = await Promise.all(Array.from({ length: to - from + 1 }, (_, i) => fetchBlock(up, from + i)));
+  if (!linked()) fetched = await fetchRange(up, from, to);
   if (!linked()) throw new Error(`blocks ${from}..${to} don't link after a refetch`);
   if (parent && fetched[0][0].parentHash.toLowerCase() !== parent) throw new Reorg(`reorg below ${from}: parent ${fetched[0][0].parentHash} != stored ${parent}`);
   const all = emptyRows();
@@ -79,15 +84,28 @@ async function tip(up: Client) {
   const report = reporter(up);
   const bus = await connect();
   console.log(`[ingest] tip from ${next} (${cur ? "cursor" : "cold start"}), batch ${B}, ttl ${cfg.rawTtlDays}d, upstreams ${up.stats().map((s) => s.host).join(", ")}`);
+  // While behind, the next AHEAD whole batches are fetched while this one is decoded and inserted: one batch at a time
+  // only just kept pace with the chain on the public endpoints (lag stuck at ~1,000 blocks, 2026-10-30). Inserts stay
+  // one aligned batch each, so a replay after a crash still dedups.
+  const AHEAD = 4, ahead = new Map<number, Promise<Fetched>>();
   for (;;) {
     const end = next - (next % B) + B - 1;
     let head = await up.head();
     while (head < end) { await sleep(400); head = await up.head(); }
+    for (let s = end + 1; s + B - 1 <= head && s <= end + AHEAD * B; s += B) {
+      if (ahead.has(s)) continue;
+      const p = fetchRange(up, s, s + B - 1);
+      p.catch(() => {}); // awaited (and thrown) when its turn comes
+      ahead.set(s, p);
+    }
+    const pre = ahead.get(next);
+    ahead.delete(next);
     if (Date.now() - ctxAt > 15_000) { ctx = await loadCtx(windowSec); ctxAt = Date.now(); }
     let r;
     try {
-      r = await runBatch(up, next, end, ctx, parent);
+      r = await runBatch(up, next, end, ctx, parent, pre);
     } catch (e) {
+      ahead.clear();
       if (!(e instanceof Reorg)) throw e;
       const fork = await findFork(next - 1, storedHash, async (n) => (await up.call<{ hash: string }>("eth_getBlockByNumber", [hex(n), false])).hash.toLowerCase());
       if (fork === null) throw new Error(`${e.message}; no common block within 1000: stopping`);

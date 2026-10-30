@@ -34,7 +34,7 @@ export function codeOf(cookie: string | undefined): string | null {
   return m && same(mac(`code:${m[1]}`), m[2]) ? m[1] : null;
 }
 
-// --- GitHub (keyless: 60 requests/h per IP; both lists are memoized, so claims cost at most a few per minute) ---
+// --- GitHub (keyless: 60 requests/h per IP; the issue list is memoized, a star check costs 1-3 requests) ---
 
 async function gh<T>(path: string): Promise<T> {
   const r = await fetch(`https://api.github.com${path}`, {
@@ -54,16 +54,16 @@ function memo<T>(fn: () => Promise<T>) {
 }
 const issues = memo(() => gh<{ title: string; body: string | null; user: { login: string } }[]>(
   `/repos/${REPO_NAME}/issues?state=all&sort=created&direction=desc&per_page=100`));
-// ponytail: walks every stargazer page (≤30, i.e. 3,000 stars); past that, ask GitHub per user with a token instead
-const stars = memo(async () => {
-  const s = new Set<string>();
-  for (let page = 1; page <= 30; page++) {
-    const p = await gh<{ login: string }[]>(`/repos/${REPO_NAME}/stargazers?per_page=100&page=${page}`);
-    for (const u of p) s.add(u.login.toLowerCase());
-    if (p.length < 100) break;
+// GitHub stopped listing a repo's stargazers without a token (401, 2026-10-30): ask for the user's own stars instead,
+// newest first, so a star given a minute ago is on page 1. ponytail: 3 pages; an older star past 300 newer ones is missed.
+async function starred(login: string): Promise<boolean> {
+  for (let page = 1; page <= 3; page++) {
+    const p = await gh<{ full_name: string }[]>(`/users/${login}/starred?sort=created&direction=desc&per_page=100&page=${page}`);
+    if (p.some((r) => r.full_name.toLowerCase() === REPO_NAME.toLowerCase())) return true;
+    if (p.length < 100) return false;
   }
-  return s;
-});
+  return false;
+}
 
 /** The login whose issue carries the code (and who starred the repo), or why not. */
 export async function claim(code: string): Promise<{ login: string } | { error: string }> {
@@ -73,7 +73,7 @@ export async function claim(code: string): Promise<{ login: string } | { error: 
   if (!hit) return { error: "No issue with your code yet. GitHub can take a few seconds to list a new one: try again shortly." };
   const login = hit.user.login.toLowerCase();
   if (cfg.explorer.revoked.has(login)) return { error: "Access for this account was withdrawn." };
-  if (cfg.explorer.requireStar && !(await stars(120_000)).has(login) && !(await stars(15_000)).has(login))
+  if (cfg.explorer.requireStar && !(await starred(login)))
     return { error: `Found your issue, @${login}, but not your star yet. Star the repo, then try again.` };
   return { login };
 }
