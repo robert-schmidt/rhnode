@@ -376,8 +376,9 @@ base URL at the new box. Nothing in lite's ClickHouse is irreplaceable (its trac
 ### 8.2 Running it on one box
 
 One `compose.yaml` runs everything; `docker compose --profile node up -d` adds Nitro (`full`, from M6), without the profile
-it is `lite`. Data lives in named volumes only, and nothing is published except the API on loopback (`API_PORT`, default
-8080), so a reverse proxy (nginx, Caddy) or an SSH tunnel decides who reaches it.
+it is `lite`. Data lives in named volumes only. Since 2026-10-30 the API is a separate service: on the same box it uses the
+loopback ports; on an edge box on the LAN, the node box publishes ClickHouse, Redis and Nitro on `NODE_BIND` and
+`ops/firewall.sh` admits only `API_HOST`. A reverse proxy in front of the API decides who reaches it.
 
 - **Linux (recommended):** put Docker's `data-root` and containerd's `root` (Docker ≥ 29 keeps images there) on a dedicated disk, so the system disk can't fill (README → Linux).
   The `lite` profile with every block at the tip used ~2.5 GB RAM in total (ClickHouse capped at 4 GB, `clickhouse/limits.xml`).

@@ -1,0 +1,13 @@
+[Unit]
+Description=rhnode: only the API box reaches the node's published ports (ops/firewall.sh)
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/srv/rhnode/ops/firewall.sh
+
+[Install]
+WantedBy=docker.service

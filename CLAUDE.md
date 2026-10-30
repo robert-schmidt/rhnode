@@ -14,8 +14,10 @@ that read the chain, and gives more insight than either.
 - API shapes copy the standards: Ethereum JSON-RPC (+ Alchemy extras), Etherscan/Blockscout v1/v2 subset, own `/v1` REST + stream.
 - Two deployment profiles from one codebase (ARCHITECTURE §8.1): `lite` (no node, free endpoints) and `full` (own Nitro).
   Every config-dependent behavior goes behind a setting, never a fork in the code.
-- One docker compose stack (`--profile node` adds Nitro), named volumes (no bind mounts for data), nothing published except
-  the API on `127.0.0.1:${API_PORT}`; a reverse proxy in front decides who reaches it.
+- One docker compose stack (`--profile node` adds Nitro), named volumes (no bind mounts for data).
+- **API split (2026-10-30):** the public API (/rpc, /ws, /api, /v1, /health) is a separate private service on an edge box.
+  This stack publishes ClickHouse/Redis/Nitro on `NODE_BIND` (loopback by default) and `ops/firewall.sh` admits only
+  `API_HOST`. Schema changes here must stay compatible with the API's pinned core commit until it bumps.
 - **Backward walk (changed 2026-10-30):** once our Nitro is synced, src/promoter also walks from go-live back to genesis,
   newest first, at idle priority on the local node. It fills only what is kept forever (kept_transfers, agg_balances). The walk's
   floor (`exactFrom` in /health) is where exact history starts. A refused wallet is promoted next and answered asynchronously

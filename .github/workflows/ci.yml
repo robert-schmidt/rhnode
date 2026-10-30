@@ -17,4 +17,3 @@ jobs:
         with: { node-version: 26, cache: npm }
       - run: npm ci
       - run: npm run check
-      - run: node src/api/subs.ts

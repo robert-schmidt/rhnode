@@ -1,17 +1,16 @@
 #!/bin/sh
 # Release on the server: ops/deploy.sh [--infra] [ref]   (ref defaults to origin/main)
 #  1. The commit must have passed CI (GitHub check runs), unless DEPLOY_SKIP_CI=1.
-#  2. Rebuilds the app image and recreates only the app services (ingest, projector, api, l1proxy). ClickHouse, Redis
-#     and Nitro are never touched: their changed definitions are listed and applied only with --infra. Nitro needs
-#     minutes to stop cleanly and to come back, so an API or WebSocket change never restarts it.
-#  3. Waits for /health (index and stream fresh); if it doesn't come back, rolls back to the previous commit.
+#  2. Rebuilds the app image and recreates only the app services (ingest, projector, promoter, l1proxy). ClickHouse,
+#     Redis and Nitro are never touched: their changed definitions are listed and applied only with --infra. Nitro needs
+#     minutes to stop cleanly and to come back.
+#  3. Waits for ingest to store new blocks; if it doesn't within 3 minutes, rolls back to the previous commit.
 # Migrations run when ingest starts; they're additive, so a rollback leaves them in place.
 set -eu
 cd "$(dirname "$0")/.."
 exec 9>/tmp/rhnode-ops.lock; flock 9 # heal.sh waits for us
 INFRA=0; [ "${1:-}" = "--infra" ] && { INFRA=1; shift; }
 REF=${1:-origin/main}
-PORT=$(grep -s '^API_PORT=' .env | cut -d= -f2); PORT=${PORT:-8080}
 log() { echo "$(date -u +%T) $*"; }
 
 git fetch -q origin
@@ -39,12 +38,13 @@ deploy() {
     else log "NOTE: $s's definition changed; not restarted (re-run with --infra to apply)"; fi
   done
 }
-healthy() { # index and stream fresh: the upstream flag alone isn't this release's fault
-  i=0; while [ $i -lt 36 ]; do
-    curl -s -m 5 "http://127.0.0.1:$PORT/health" | grep -q '"index":true,"stream":true' && return 0
+healthy() { # ingest stores new blocks again (the API lives on another box; its own deploy checks /health)
+  t0=$(tip); i=0; while [ $i -lt 36 ]; do
+    [ "$(tip)" -gt "$t0" ] && return 0
     i=$((i + 1)); sleep 5
   done; return 1
 }
+tip() { docker compose exec -T clickhouse clickhouse-client -q "SELECT max(block) FROM rhnode.ctl_cursors FINAL WHERE name = 'tip'" </dev/null 2>/dev/null || echo 0; }
 
 log "deploying ${NEXT%"${NEXT#???????}"} over ${PREV%"${PREV#???????}"} ($APP)"
 deploy "$NEXT"

@@ -7,7 +7,7 @@
     "node": ">=26"
   },
   "scripts": {
-    "up": "docker compose -f compose.yaml -f compose.dev.yaml up -d clickhouse redis",
+    "up": "docker compose up -d clickhouse redis",
     "migrate": "node --env-file-if-exists=.env src/migrate.ts",
     "ingest": "node --env-file-if-exists=.env src/ingest/main.ts",
     "typecheck": "tsc",

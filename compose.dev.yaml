@@ -1,6 +1,0 @@
-# Development only: lets the host (tests, scripts, clickhouse-client) reach ClickHouse.
-# Loopback only, never the LAN. Not used on a server.
-services:
-  clickhouse:
-    ports:
-      - "127.0.0.1:8123:8123"

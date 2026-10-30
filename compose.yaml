@@ -1,5 +1,5 @@
-# One stack (ARCHITECTURE §8.2). Data lives in named volumes only; nothing is
-# published except the API (127.0.0.1:${API_PORT:-8080}, from M3). Dev extras: compose.dev.yaml.
+# One stack (ARCHITECTURE §8.2). Data lives in named volumes only. ClickHouse, Redis and Nitro are published on
+# NODE_BIND (loopback by default; 0.0.0.0 for an API box on the LAN, which ops/firewall.sh then admits alone).
 name: rhnode
 
 services:
@@ -15,6 +15,7 @@ services:
       - ./clickhouse/limits.xml:/etc/clickhouse-server/config.d/limits.xml:ro
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
+    ports: ["${NODE_BIND:-127.0.0.1}:8123:8123"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
       interval: 5s
@@ -23,7 +24,8 @@ services:
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
-    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
+    ports: ["${NODE_BIND:-127.0.0.1}:6379:6379"] # the API box reads the block stream (ops/firewall.sh admits only it)
 
   ingest:
     build: .
@@ -32,7 +34,7 @@ services:
     env_file: .env
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
     depends_on:
       clickhouse: { condition: service_healthy }
 
@@ -58,25 +60,10 @@ services:
     depends_on:
       clickhouse: { condition: service_healthy }
 
-  api:
-    build: .
-    restart: unless-stopped
-    command: ["node", "src/api/main.ts"]
-    env_file: .env
-    environment:
-      CLICKHOUSE_URL: http://clickhouse:8123
-      REDIS_URL: redis://redis:6379
-      NITRO_HTTP: http://nitro:8547 # /health probes it; harmless without the node profile
-      NITRO_WS: ws://nitro:8548 # the fast /ws feed, used only while the node is synced
-    ports:
-      - "127.0.0.1:${API_PORT:-8080}:8080"
-    depends_on:
-      clickhouse: { condition: service_healthy }
-
   # Our own Robinhood Chain full node (`docker compose --profile node up -d`). Flags verified against
   # nitro-node v3.12.2 `--help` (2026-10-29); seed it with nitro/snapshot.sh first (otherwise it syncs from genesis
   # for weeks). Memory: capped so the box's other services win (oom_score_adj kills Nitro first). Sized for a 16 GB
-  # box shared with ClickHouse; raise NITRO_MEM and the caches on a bigger one. No published ports.
+  # box shared with ClickHouse; raise NITRO_MEM and the caches on a bigger one. HTTP/WS on NODE_BIND, for the API box.
   # Nitro's L1 reads go through this (src/l1proxy.ts): keyed L1 URLs stay out of Nitro's logs, and providers fail over.
   l1proxy:
     profiles: ["node"]
@@ -95,6 +82,7 @@ services:
     mem_limit: ${NITRO_MEM:-8g}
     memswap_limit: ${NITRO_MEM:-8g}
     oom_score_adj: 500
+    ports: ["${NODE_BIND:-127.0.0.1}:8547:8547", "${NODE_BIND:-127.0.0.1}:8548:8548"]
     ulimits:
       nofile: { soft: 65536, hard: 65536 }
     environment:
