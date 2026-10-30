@@ -336,7 +336,7 @@ ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}<
 ${token}
 <h2>ETH funding <span class="muted small">(direct transfers that happened, ${cov.from ? html`since block ${link("block", String(cov.from))}` : "all"}; not ETH sent by contracts)</span></h2>
 <dl><dt>Received</dt><dd>${side(fund.inSide, "from")}</dd><dt>Sent</dt><dd>${side(fund.outSide, "to")}</dd></dl>
-${fund.first.length ? html`<h3>First funders</h3>${edges(fund.first, fund.hash, (e) => html`${link("address", e.peer)}${fund.hubs.get(e.peer) ? html` <span class="muted small">funded ${fund.hubs.get(e.peer)!.toLocaleString("en-US")} wallets</span>` : ""}`)}` : ""}
+${fund.first.length ? html`<h3>First funders</h3>${edges(fund.first, fund.hash, (e) => html`${link("address", e.peer)}${fund.hubs.get(e.peer) ? html` <span class="muted small">funded ${fund.hubs.get(e.peer)!.toLocaleString("en-US")} wallet${fund.hubs.get(e.peer) === 1 ? "" : "s"}</span>` : ""}`)}` : ""}
 ${fund.funded.length ? html`<h3>First wallets it funded</h3>${edges(fund.funded, fund.hash, (e) => link("address", e.peer))}` : ""}
 <h2>Transactions <span class="muted small">(${cov.from ? html`all since block ${link("block", String(cov.from))}` : "all"})</span></h2>
 ${cov.from ? html`<p class="loading"><span class="spin"></span> ${cov.scan == null
