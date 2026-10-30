@@ -57,11 +57,11 @@ export async function home(): Promise<Page> {
 <h1>Robinhood Chain</h1>
 <div class="stats"><div><b>${head.toLocaleString("en-US")}</b><span>latest block</span></div><div><b>${tps}</b><span>tx/s (last minute)</span></div>
 <div><b>~0.1 s</b><span>block time</span></div></div>
-<div class="cols"><section><h2>Latest blocks</h2><table><tr><th>Block</th><th>Age</th><th>Txs</th><th>Gas used</th></tr>
-${blocks.map((b) => html`<tr><td>${link("block", b.number)}</td><td>${when(b.ts)}</td><td>${b.tx_count}</td><td>${Number(b.gas_used).toLocaleString("en-US")}</td></tr>`)}
+<div class="cols"><section><h2>Latest blocks</h2><table><tr><th>Block</th><th>Time (UTC)</th><th>Age</th><th>Txs</th><th>Gas used</th></tr>
+${blocks.map((b) => html`<tr><td>${link("block", b.number)}</td><td>${when(b.ts)}</td><td class="muted">${ago(b.ts)}</td><td>${b.tx_count}</td><td>${Number(b.gas_used).toLocaleString("en-US")}</td></tr>`)}
 </table></section>
-<section><h2>Latest transactions</h2><table><tr><th>Tx</th><th>Method</th><th>From → To</th><th>Value</th></tr>
-${txs.map((t) => html`<tr${t.status ? "" : html` class="failed"`}><td>${link("tx", t.hash)}</td><td><span class="tag">${method(t.created ? "" : t.selector, names)}</span></td>
+<section><h2>Latest transactions</h2><table><tr><th>Tx</th><th>Time (UTC)</th><th>Method</th><th>From → To</th><th>Value</th></tr>
+${txs.map((t) => html`<tr${t.status ? "" : html` class="failed"`}><td>${link("tx", t.hash)}</td><td>${when(t.ts)}</td><td><span class="tag">${method(t.created ? "" : t.selector, names)}</span></td>
 <td>${link("address", t.from)} → ${t.created ? link("address", t.created, "new contract") : t.to ? link("address", t.to) : "—"}</td><td>${eth(t.v)}</td></tr>`)}
 </table></section></div>` };
 }
@@ -82,7 +82,7 @@ export async function block(rpc: Rpc, id: string): Promise<Page> {
 <h1>Block <span class="mono">${n.toLocaleString("en-US")}</span></h1>
 <nav class="pager">${n > 0 ? link("block", n - 1, "← previous") : ""} ${n < head ? link("block", n + 1, "next →") : ""}</nav>
 <dl><dt>Hash</dt><dd class="mono">${b.hash}</dd><dt>Parent</dt><dd>${n > 0 ? link("block", b.parentHash, b.parentHash) : "—"}</dd>
-<dt>Time</dt><dd>${utc(ts)} (${ago(ts)})</dd><dt>Transactions</dt><dd>${b.transactions.length}</dd>
+<dt>Timestamp</dt><dd>${utc(ts)} <span class="muted small">(unix ${ts}; whole seconds, so ~10 blocks share one)</span></dd><dt>Transactions</dt><dd>${b.transactions.length}</dd>
 <dt>Gas used</dt><dd>${num(b.gasUsed).toLocaleString("en-US")} of ${num(b.gasLimit).toLocaleString("en-US")}</dd>
 ${b.baseFeePerGas ? html`<dt>Base fee</dt><dd>${units(big(b.baseFeePerGas), 9, 4)} gwei</dd>` : ""}
 ${b.l1BlockNumber ? html`<dt>L1 block</dt><dd>${num(b.l1BlockNumber).toLocaleString("en-US")}</dd>` : ""}</dl>
@@ -118,7 +118,7 @@ export async function tx(rpc: Rpc, hash: string): Promise<Page> {
 <h1>Transaction</h1>
 <dl><dt>Hash</dt><dd class="mono">${hash}</dd>
 <dt>Status</dt><dd>${ok ? html`<span class="ok">Success</span>` : html`<span class="bad">Failed</span>`}</dd>
-<dt>Block</dt><dd>${link("block", n)}${ts ? html` · ${utc(ts)} (${ago(ts)})` : ""}</dd>
+<dt>Block</dt><dd>${link("block", n)}${ts ? html` · ${utc(ts)}` : ""}</dd>
 <dt>From</dt><dd>${link("address", t.from, t.from)}</dd>
 <dt>To</dt><dd>${t.to ? link("address", t.to, t.to) : r.contractAddress ? html`${link("address", r.contractAddress, r.contractAddress)} (created)` : "—"}</dd>
 <dt>Method</dt><dd><span class="tag">${t.to ? method(t.input, names) : "create"}</span> ${names.get(t.input.slice(0, 10).toLowerCase()) ? html`<span class="muted mono small">${names.get(t.input.slice(0, 10).toLowerCase())}</span>` : ""}</dd>
@@ -170,12 +170,12 @@ ${c?.deployer ? html`<dt>Deployed by</dt><dd>${link("address", c.deployer, c.dep
 ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}</dl>
 ${token}
 <h2>Transactions <span class="muted small">(last 14 days)</span></h2>
-${txs.length ? html`<table><tr><th>Tx</th><th>Age</th><th>Method</th><th>From → To</th><th>Value</th></tr>
+${txs.length ? html`<table><tr><th>Tx</th><th>Time (UTC)</th><th>Method</th><th>From → To</th><th>Value</th></tr>
 ${txs.map((t) => html`<tr${t.status ? "" : html` class="failed"`}><td>${link("tx", t.hash)}</td><td>${when(t.ts)}</td><td><span class="tag">${method(t.created ? "" : t.selector, names)}</span></td>
 <td>${t.from === a ? html`<b>self</b>` : link("address", t.from)} → ${t.created ? "new contract" : t.to === a ? html`<b>self</b>` : t.to ? link("address", t.to) : "—"}</td><td>${eth(t.v)}</td></tr>`)}</table>
 ${txs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?txb=${txs.at(-1)!.block}${tfb ? `&tfb=${tfb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None in the last 14 days.</p>`}
 <h2>Token transfers <span class="muted small">(ERC-20, since our history starts)</span></h2>
-${tfs.length ? html`<table><tr><th>Tx</th><th>Age</th><th>Token</th><th>From → To</th><th>Amount</th></tr>
+${tfs.length ? html`<table><tr><th>Tx</th><th>Time (UTC)</th><th>Token</th><th>From → To</th><th>Amount</th></tr>
 ${tfs.map((t) => { const m = tmeta.get(t.token); return html`<tr><td>${link("tx", t.tx_hash)}</td><td>${when(t.ts)}</td><td>${link("address", t.token, sym(m, t.token))}</td>
 <td>${t.from === a ? html`<b>self</b>` : link("address", t.from)} → ${t.to === a ? html`<b>self</b>` : link("address", t.to)}</td><td>${m ? units(t.amt, m.decimals) : t.amt}</td></tr>`; })}</table>
 ${tfs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?tfb=${tfs.at(-1)!.block}${txb ? `&txb=${txb}` : ""}">older →</a></nav>` : ""}` : html`<p class="muted">None.</p>`}` };

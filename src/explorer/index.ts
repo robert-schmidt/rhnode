@@ -4,7 +4,9 @@
 // gets a token bucket for cache misses only, so a cached page costs nothing; nginx limits raw request rates in front.
 import { readFileSync } from "node:fs";
 import type http from "node:http";
-import { html, page } from "./html.ts";
+import { html, page, REPO, type Html } from "./html.ts";
+import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
+import { cfg } from "../config.ts";
 import { address, block, home, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
 
 const CSS = readFileSync(new URL("./style.css", import.meta.url));
@@ -85,10 +87,12 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
     res.end("User-agent: *\nDisallow: /search\nDisallow: /address/*?\nCrawl-delay: 2\n"); return true;
   }
   if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return true; }
+  if (/^\/access(\/claim|\/token)?$/.test(url.pathname)) { await access(req, res, url); return true; }
   const r = route(url.pathname, url.searchParams);
   if (!r) return false;
   if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, { allow: "GET, HEAD" }); res.end(); return true; }
   if ("redirect" in r) { res.writeHead(301, { location: r.redirect, ...SECURITY }); res.end(); return true; }
+  if (gated() && !verify(cookies(req).rhx)) { res.writeHead(303, { location: "/access", "cache-control": "no-store", ...SECURITY }); res.end(); return true; }
 
   let out: Out | undefined;
   const hit = cache.get(r.key);
@@ -96,8 +100,7 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
   else {
     let p = inflight.get(r.key);
     if (!p) {
-      const ip = String(req.headers["x-real-ip"] ?? req.socket.remoteAddress ?? "");
-      if (!allow(ip)) {
+      if (!allow(ipOf(req))) {
         res.writeHead(429, { "content-type": "text/plain", "retry-after": "2", ...SECURITY }); res.end("Too many requests: slow down a little.\n"); return true;
       }
       p = render(r, rpc).finally(() => inflight.delete(r.key));
@@ -112,8 +115,76 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
   if (out.redirect) { res.writeHead(302, { location: out.redirect, "cache-control": "no-store", ...SECURITY }); res.end(); return true; }
   res.writeHead(out.status, {
     "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(out.body),
-    "cache-control": out.ttl >= IMMUTABLE_S ? "public, max-age=86400, immutable" : `public, max-age=${Math.min(out.ttl, 60)}`, ...SECURITY,
+    "cache-control": `${gated() ? "private" : "public"}, ${out.ttl >= IMMUTABLE_S ? "max-age=86400, immutable" : `max-age=${Math.min(out.ttl, 60)}`}`, ...SECURITY,
   });
   res.end(req.method === "HEAD" ? undefined : out.body);
   return true;
+}
+
+// --- access (gate.ts): the code/token page and its two forms ---
+
+const ipOf = (req: http.IncomingMessage) => String(req.headers["x-real-ip"] ?? req.socket.remoteAddress ?? "");
+const cookies = (req: http.IncomingMessage) => Object.fromEntries((req.headers.cookie ?? "").split(";")
+  .map((c) => { const i = c.indexOf("="); return [c.slice(0, i).trim(), c.slice(i + 1).trim()]; }));
+const cookie = (name: string, v: string, maxAge: number) => `${name}=${v}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+const YEAR = 31_536_000;
+
+function send(res: http.ServerResponse, status: number, title: string, body: Html, setCookies: string[] = []) {
+  const s = page(title, body);
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...(setCookies.length ? { "set-cookie": setCookies } : {}), ...SECURITY });
+  res.end(s);
+}
+async function form(req: http.IncomingMessage): Promise<URLSearchParams> {
+  let s = "";
+  for await (const chunk of req) { s += chunk; if (s.length > 2048) throw new Error("form too large"); }
+  return new URLSearchParams(s);
+}
+
+function accessPage(code: string, o: { error?: string; token?: string; login?: string | null } = {}): Html {
+  const issue = `${REPO}/issues/new?title=${encodeURIComponent("Explorer access")}&body=${encodeURIComponent(`${CODE_PREFIX}${code}\n\nWhat will you use the explorer for? (optional)`)}`;
+  return html`<h1>Explorer access</h1>
+${o.error ? html`<p class="bad">${o.error}</p>` : ""}
+${o.token ? html`<div class="note"><p class="ok">Welcome, @${o.login}: this browser has access now.</p>
+<p>Your token, for other browsers and devices. Keep it private: it is tied to your GitHub account.</p>
+<p class="mono wrap token">${o.token}</p><p><a href="/">Open the explorer →</a></p></div>`
+    : o.login ? html`<p class="ok">This browser has access (@${o.login}). <a href="/">Open the explorer →</a></p>` : ""}
+<p>The explorer is free: Robinhood Chain read straight from our own node and index. Access tokens keep it fast for everyone.</p>
+<h2>Get a token</h2>
+<ol class="steps">
+${cfg.explorer.requireStar ? html`<li>Star the repository <a href="${REPO}" rel="noopener" target="_blank">${REPO_NAME}</a>.</li>` : ""}
+<li>Open an issue there containing your code <span class="tag">${CODE_PREFIX}${code}</span>: <a href="${issue}" rel="noopener" target="_blank">open it prefilled</a>.</li>
+<li>Come back and <form method="post" action="/access/claim" class="inline"><button>get my token</button></form></li>
+</ol>
+<p class="muted small">The code works only in this browser, for a day. Your token is shown here and never posted on GitHub.</p>
+<h2>Have a token?</h2>
+<form method="post" action="/access/token" class="row"><input name="token" required maxlength="120" autocomplete="off" spellcheck="false" placeholder="yourlogin.1793360000.…" aria-label="Access token"><button>Use it</button></form>`;
+}
+
+async function access(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+  if (!gated()) return send(res, 200, "Access", html`<h1>Explorer access</h1><p>This explorer is open: no token needed. <a href="/">Open it →</a></p>`);
+  const c = cookies(req), set: string[] = [];
+  let code = codeOf(c.rhc);
+  const fresh = !code;
+  if (!code) { const ch = challenge(); code = ch.code; set.push(cookie("rhc", ch.cookie, 86400)); }
+  if (req.method === "GET" || req.method === "HEAD") return send(res, 200, "Access", accessPage(code, { login: verify(c.rhx) }), set);
+  if (req.method !== "POST" || url.pathname === "/access") { res.writeHead(405, { allow: "GET, POST" }); res.end(); return; }
+  if (!allow(ipOf(req))) { res.writeHead(429, { "content-type": "text/plain", "retry-after": "2", ...SECURITY }); res.end("Too many requests: slow down a little.\n"); return; }
+  let f: URLSearchParams;
+  try { f = await form(req); } catch { res.writeHead(413); res.end(); return; }
+  if (url.pathname === "/access/token") {
+    const t = (f.get("token") ?? "").trim();
+    if (!verify(t)) return send(res, 401, "Access", accessPage(code, { error: "That token is not valid (or was withdrawn)." }), set);
+    res.writeHead(303, { location: "/", "set-cookie": [...set, cookie("rhx", t, YEAR)], "cache-control": "no-store", ...SECURITY });
+    res.end(); return;
+  }
+  if (fresh) return send(res, 400, "Access", accessPage(code, { error: "This browser had no code yet (cookies off, or it expired). Here is a new one: put it in your issue." }), set);
+  let r: Awaited<ReturnType<typeof claim>>;
+  try { r = await claim(code); } catch (e) {
+    console.warn(`[explorer] access claim: ${(e as Error).message}`);
+    r = { error: "GitHub didn't answer just now. Try again in a few minutes." };
+  }
+  if ("error" in r) return send(res, 200, "Access", accessPage(code, { error: r.error }), set);
+  const token = mint(r.login);
+  console.log(`[explorer] access token minted for @${r.login}`);
+  send(res, 200, "Access", accessPage(code, { token, login: r.login }), [cookie("rhx", token, YEAR), cookie("rhc", "", 0)]);
 }

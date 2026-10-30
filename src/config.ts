@@ -63,6 +63,18 @@ export const cfg = {
     /** Optional: Blockscout PRO key. When set, /api questions we can't answer exactly are proxied there. */
     blockscoutKey: env.BLOCKSCOUT_API_KEY ?? "",
   },
+  /** The explorer's pages (src/explorer). With a secret they need an access token (src/explorer/gate.ts); empty = open. */
+  explorer: {
+    secret: env.EXPLORER_SECRET ?? "",
+    /** Self-serve tokens: the GitHub repo where an access issue is opened (owner/name). */
+    repo: env.EXPLORER_REPO ?? "", // default: the repo the footer links
+    /** The issue's author must also have starred the repo. */
+    requireStar: env.EXPLORER_REQUIRE_STAR !== "0",
+    /** Optional: a GitHub token (no scopes) lifts the keyless 60 requests/h. Never logged. */
+    githubToken: env.GITHUB_TOKEN ?? "",
+    /** GitHub logins whose tokens no longer work. */
+    revoked: new Set((env.EXPLORER_REVOKED ?? "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean)),
+  },
   clickhouse: {
     url: env.CLICKHOUSE_URL ?? "http://127.0.0.1:8123",
     username: env.CLICKHOUSE_USER ?? "rhnode",

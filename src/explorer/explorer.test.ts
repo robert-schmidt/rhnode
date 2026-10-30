@@ -30,3 +30,22 @@ test("route validates before anything is queried", () => {
   assert.equal((route(`/address/${A.toLowerCase()}`, new URLSearchParams("txb=5")) as { key: string }).key, `/address/${A.toLowerCase()}?txb=5`);
   assert.equal((route("/search", new URLSearchParams({ q: "x".repeat(500) })) as { q: string }).q.length, 100);
 });
+
+test("access tokens and codes", async () => {
+  const { cfg } = await import("../config.ts");
+  const g = await import("./gate.ts");
+  (cfg.explorer as { secret: string }).secret = "test-secret";
+  const t = g.mint("Alice-1");
+  assert.equal(g.verify(t), "alice-1");
+  assert.equal(g.verify(t.replace(/.$/, (c) => (c === "A" ? "B" : "A"))), null);
+  assert.equal(g.verify(t.replace("alice-1", "bob")), null);
+  assert.equal(g.verify(`${t}<x>`), null);
+  cfg.explorer.revoked.add("alice-1");
+  assert.equal(g.verify(t), null);
+  cfg.explorer.revoked.delete("alice-1");
+  const { code, cookie } = g.challenge();
+  assert.equal(g.codeOf(cookie), code);
+  assert.equal(g.codeOf(cookie.replace(code, "0".repeat(16))), null);
+  (cfg.explorer as { secret: string }).secret = "other";
+  assert.equal(g.verify(t), null);
+});
