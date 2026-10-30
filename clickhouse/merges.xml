@@ -1,0 +1,8 @@
+<!-- Merge at least 10 parts at once. Ingest and the projector insert a small part into ~25 tables every second; with the
+     default (0) each new ~2 KB part was merged straight into the partition's ~1 MB part, rewriting it every second:
+     kept_native wrote 973 MB in 20 min to add 1.7 MB, ~30 GiB/h for the whole database (part_log, 2026-10-30). -->
+<clickhouse>
+    <merge_tree>
+        <min_parts_to_merge_at_once>10</min_parts_to_merge_at_once>
+    </merge_tree>
+</clickhouse>
