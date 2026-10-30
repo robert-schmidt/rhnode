@@ -95,7 +95,7 @@ services:
       - --execution.caching.trie-dirty-cache=256
       - --execution.caching.stylus-lru-cache-capacity=128
       - --persistent.pebble.max-concurrent-compactions=3
-      - --node.resource-mgmt.mem-free-limit=768MiB # refuse heavy RPC instead of OOM
+      - --node.resource-mgmt.mem-free-limit=768M # refuse heavy RPC instead of OOM
       - --http.addr=0.0.0.0
       - --http.port=8547
       - --http.vhosts=*
