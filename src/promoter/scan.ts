@@ -1,6 +1,7 @@
 // The wallet scan (2026-10-30: one pass, all wallets). Our node is pruned and has no address index, so the
 // txs of a wallet before go-live are found only by reading every block. One pass, from go-live down to genesis, newest
-// first, writes a pointer for each tx's sender, recipient and created contract into idx_wallet_txs (migration 015).
+// first, writes a pointer for each tx's sender, recipient and created contract into idx_wallet_txs (migration 015), and
+// each tx that carries ETH into native_edges (migration 016, status 2: blocks don't say whether a tx failed).
 // ctl_cursors 'scan' is its floor: every wallet's txs from there on are indexed. It runs only while our node is synced
 // and ingest keeps up, and rests in proportion to its work, as the walk does (src/promoter/walk.ts).
 // Measured 2026-10-30 on the node box while Nitro was still syncing: 8×25 blocks in flight read ~1,880 blocks/s, so the
@@ -16,9 +17,10 @@ const PAR = Number(process.env.SCAN_PAR ?? 8); // batches in flight
 const DUTY = Number(process.env.SCAN_DUTY ?? 0.5);
 const ARBOS = "0x6a"; // ArbOS's start-of-block tx: one in every block, always from the same address
 
-type Tx = { from: string; to: string | null; nonce: string; transactionIndex: string; type: string };
+type Tx = { from: string; to: string | null; nonce: string; transactionIndex: string; type: string; value: string };
 type Block = { number: string; transactions: Tx[] };
 type Row = { wallet: string; block: number; tx_index: number };
+type Edge = { dst: string; src: string; value: string; block: number; tx_index: number; status: number };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const hex = (n: number) => "0x" + n.toString(16);
 
@@ -37,23 +39,28 @@ async function blocks(node: string, from: number, to: number): Promise<Block[]> 
   return j.map((x) => x.result!);
 }
 
-/** The pointers a block gives: its sender, recipient and created contract, once each per tx. */
-export function pointers(b: Block): Row[] {
-  const block = Number(b.number), out: Row[] = [];
+/** What a block gives: a pointer for each tx's sender, recipient and created contract (once each), and an edge for
+ *  each tx that carries ETH (status 2: unknown). */
+export function pointers(b: Block): { rows: Row[]; edges: Edge[] } {
+  const block = Number(b.number), rows: Row[] = [], edges: Edge[] = [];
   for (const t of b.transactions) {
     if (t.type === ARBOS) continue;
+    const tx_index = Number(t.transactionIndex), from = t.from.toLowerCase();
     const created = t.to ? "" : getContractAddress({ from: t.from as `0x${string}`, nonce: BigInt(t.nonce) }).toLowerCase();
-    for (const wallet of new Set([t.from.toLowerCase(), (t.to ?? "").toLowerCase(), created])) if (wallet) out.push({ wallet, block, tx_index: Number(t.transactionIndex) });
+    for (const wallet of new Set([from, (t.to ?? "").toLowerCase(), created])) if (wallet) rows.push({ wallet, block, tx_index });
+    if (BigInt(t.value) > 0n) edges.push({ dst: t.to ? t.to.toLowerCase() : created, src: from, value: BigInt(t.value).toString(), block, tx_index, status: 2 });
   }
-  return out;
+  return { rows, edges };
 }
 
-/** Pointers of [lo, hi], fetched in batches, PAR at a time. */
-async function chunk(node: string, lo: number, hi: number): Promise<Row[]> {
+/** Pointers and edges of [lo, hi], fetched in batches, PAR at a time. */
+async function chunk(node: string, lo: number, hi: number): Promise<{ rows: Row[]; edges: Edge[] }> {
   const parts: [number, number][] = [];
   for (let a = lo; a <= hi; a += BATCH) parts.push([a, Math.min(hi, a + BATCH - 1)]);
-  const out: Row[] = [];
-  const work = async () => { for (let p = parts.shift(); p; p = parts.shift()) for (const b of await blocks(node, p[0], p[1])) out.push(...pointers(b)); };
+  const out = { rows: [] as Row[], edges: [] as Edge[] };
+  const work = async () => { for (let p = parts.shift(); p; p = parts.shift()) for (const b of await blocks(node, p[0], p[1])) {
+    const r = pointers(b); out.rows.push(...r.rows); out.edges.push(...r.edges);
+  } };
   await Promise.all(Array.from({ length: PAR }, work));
   return out;
 }
@@ -70,11 +77,12 @@ export async function scan(golive: number): Promise<void> {
       const t0 = Date.now();
       const hi = floor - 1, lo = hi - (hi % STEP); // a fixed grid: a retried chunk writes the same rows under the same token
       const out = await chunk(node, lo, hi);
-      if (out.length) await insert("idx_wallet_txs", out, `scan:${lo}`);
+      if (out.edges.length) await insert("native_edges", out.edges, `scan:${lo}`);
+      if (out.rows.length) await insert("idx_wallet_txs", out.rows, `scan:${lo}`);
       await ch.insert({ table: "ctl_cursors", values: [{ name: "scan", block: lo, hash: "", version: Date.now() }], format: "JSONEachRow" });
       floor = lo;
       const ms = Date.now() - t0;
-      if (lo % 100_000 === 0) console.log(JSON.stringify({ at: new Date().toISOString(), scan: lo, pointers: out.length, ms }));
+      if (lo % 100_000 === 0) console.log(JSON.stringify({ at: new Date().toISOString(), scan: lo, pointers: out.rows.length, edges: out.edges.length, ms }));
       await sleep(ms * (1 / DUTY - 1));
     } catch (e) {
       console.warn(`[scan] ${(e as Error).message}`);
@@ -89,5 +97,5 @@ if (import.meta.main && process.argv[2] === "bench") {
   const from = Number(process.argv[3]), n = Number(process.argv[4] ?? 2_000), t0 = Date.now();
   const out = await chunk(process.env.NITRO_HTTP ?? "http://127.0.0.1:8547", from, from + n - 1);
   const s = (Date.now() - t0) / 1000;
-  console.log(`${n} blocks, ${out.length} pointers in ${s.toFixed(1)} s: ${Math.round(n / s)} blocks/s`);
+  console.log(`${n} blocks, ${out.rows.length} pointers, ${out.edges.length} edges in ${s.toFixed(1)} s: ${Math.round(n / s)} blocks/s`);
 }

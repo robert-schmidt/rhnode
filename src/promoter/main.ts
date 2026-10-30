@@ -126,10 +126,12 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
 if (import.meta.main) {
   const B0 = await golive();
   console.log(`[promoter] go-live block ${B0}; max ${MAX_TRANSFERS} transfers a token, ${CONCURRENCY} at a time`);
-  if (process.env.SCAN === "1") void scan(B0); // every wallet's txs below go-live, once our node is synced
   void walletWorker(); // requested wallets (src/watch.ts) are indexed alongside the walk and token promotion
   // The walk holds every token's history above its floor, so promotions wait for it, and afterwards fetch only below it.
   if (process.env.WALK === "1") await walk(up, B0);
+  // Every wallet's txs below go-live, after the walk: both are bound by the node box's CPU, and the walk serves more
+  // (token holders, info and transfer history before go-live).
+  if (process.env.SCAN === "1") void scan(B0);
   const busy = new Set<string>();
   const worker = async () => { for (;;) {
     const [q] = await rows<{ token: string }>(
