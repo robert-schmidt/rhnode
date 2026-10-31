@@ -4,15 +4,21 @@
 "use strict";
 (() => {
   const POLL = 1500, KEEP = 15; // /live carries ~4 s of blocks, so a poll never skips one
-  const lists = ["blocks", "txs"].map((id) => ({ el: document.getElementById(id), queue: [], held: false }));
-  const tiles = document.getElementById("tiles"), net = document.getElementById("net"), badge = document.querySelector(".live"), label = badge && badge.querySelector("span");
+  const lists = ["blocks", "txs"].map((id) => { const el = document.getElementById(id); return { el, badge: el && el.closest("section").querySelector(".live"), queue: [], held: false }; });
+  const tiles = document.getElementById("tiles"), net = document.getElementById("net");
   if (!lists.every((l) => l.el) || !tiles) return;
   document.documentElement.classList.add("js");
-  if (badge) badge.hidden = false;
-
-  const state = (s) => { if (badge) { badge.dataset.state = s; label.textContent = s === "live" ? "Live" : s === "paused" ? "Paused" : "Reconnecting"; } };
+  let off = false;
+  // each list's badge: Paused while pointed at (that list only), Reconnecting while /live fails, else Live
+  const show = (l) => {
+    if (!l.badge) return;
+    const s = off ? "off" : l.held ? "paused" : "live";
+    l.badge.hidden = false; l.badge.dataset.state = s;
+    l.badge.querySelector("span").textContent = s === "live" ? "Live" : s === "paused" ? "Paused" : "Reconnecting";
+  };
+  lists.forEach(show);
   for (const l of lists) {
-    const hold = (on) => { l.held = on; state(lists.some((x) => x.held) ? "paused" : "live"); };
+    const hold = (on) => { l.held = on; show(l); };
     l.el.addEventListener("pointerenter", () => hold(true));
     l.el.addEventListener("pointerleave", () => hold(false));
     l.el.addEventListener("focusin", () => hold(true));
@@ -65,12 +71,11 @@
         const cap = l.held ? KEEP : 40; // paused: older ones would scroll off anyway
         if (l.queue.length > cap) l.queue.splice(0, l.queue.length - cap);
       }
-      wait = POLL;
-      if (!lists.some((x) => x.held)) state("live");
+      wait = POLL; off = false;
     } catch {
-      wait = Math.min(wait * 2, 30000);
-      state("off");
+      wait = Math.min(wait * 2, 30000); off = true;
     }
+    lists.forEach(show);
   };
   const loop = async () => { await poll(); setTimeout(loop, wait); };
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });

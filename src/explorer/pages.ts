@@ -158,6 +158,7 @@ function glance(wei: bigint, ms: Move[], meta: Map<string, Token>): Html {
   if (!all.length) return html`<span class="muted">—</span>`;
   return html`<span class="one">${all[0]}</span>${all.length > 1 ? html`<span class="sub">+${all.length - 1} more</span>` : ""}`;
 }
+const LIVE = html`<span class="live" hidden><i></i><span>Live</span></span>`; // live.js shows it, per list
 const liveTiles = (head: number, net: Stats) => html`<div><b>${link("block", head)}</b><span>latest block</span></div>${net.tiles}`;
 
 export async function home(rpc: Rpc): Promise<Page> {
@@ -165,8 +166,8 @@ export async function home(rpc: Rpc): Promise<Page> {
   return { status: 200, title: "Latest blocks and transactions", refresh: 10, live: true, body: html`
 <h1>Robinhood Chain</h1>
 <div class="stats" id="tiles">${liveTiles(head, net)}</div>
-<div class="cols"><section><h2>Latest blocks <span class="live" hidden><i></i><span>Live</span></span></h2><ol class="feed blocks" id="blocks">${blockRows.slice(0, 15)}</ol></section>
-<section><h2>Latest transactions</h2><ol class="feed txs" id="txs">${txRows}</ol></section></div>
+<div class="cols"><section><h2>Latest blocks ${LIVE}</h2><ol class="feed blocks" id="blocks">${blockRows.slice(0, 15)}</ol></section>
+<section><h2>Latest transactions ${LIVE}</h2><ol class="feed txs" id="txs">${txRows}</ol></section></div>
 <div id="net">${net.table}</div>
 <p class="muted small" id="hint">New blocks and transactions come in at the top; pointing at a list pauses it. Failed transactions are dimmed.</p>` };
 }
