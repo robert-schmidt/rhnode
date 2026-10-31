@@ -48,8 +48,9 @@ export const NET24 = `SELECT token, pool, any(qt) AS q, sum(abs(nt)) AS nv, sum(
   FROM (SELECT token, pool, tx_hash, any(quote) AS qt, min(time) AS tm,
     sum(if(quote_delta > 0, usd, -usd) * sign) AS nt, sum(usd * sign) AS gr FROM ev_prices
     WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, pool, tx_hash) GROUP BY token, pool`;
-// per launchpad token, its own market (op; '' when it has none yet); tested on the node's ClickHouse 2026-10-31
-const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' AND m.token != '', g.pool, l.source = 'pons-v2', JSONExtractString(l.detail, 'curve'),
+// per launchpad token (rows only for tokens of Pons v2, Bags, Flap, hood.fun), its own market (op; '' when it has none yet);
+// tested on the node's ClickHouse 2026-10-31
+export const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' AND m.token != '', g.pool, l.source = 'pons-v2', JSONExtractString(l.detail, 'curve'),
     l.source = 'bags', JSONExtractString(l.detail, 'poolId'), JSONExtractString(m.detail, 'pool')) AS op
   FROM (SELECT token, source, detail FROM kept_launches FINAL WHERE token IN {t:Array(String)} AND kind = 'launch' AND sign = 1
         AND source IN ('pons-v2', 'bags', 'flap', 'hood-fun') ORDER BY block LIMIT 1 BY token) AS l
