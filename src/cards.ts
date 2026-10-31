@@ -89,6 +89,9 @@ export function band(sqrtX96: bigint, tick: number, L: bigint, net: Map<number, 
   return [a0, a1];
 }
 
+// pool → its initialized ticks' liquidityNet over [lo, hi] as read at `at` around `tick` (see build)
+const ticks = new Map<string, { at: number; tick: number; lo: number; hi: number; net: Map<number, bigint> }>();
+
 /** multicall in chunks, so a batch of cards stays under the node's eth_call gas cap */
 const mc = (up: Up, cs: Call[]) => Promise.all(Array.from({ length: Math.ceil(cs.length / 500) }, (_, i) => cs.slice(i * 500, i * 500 + 500))
   .map((c) => multicall(up, c).catch(() => c.map(() => null)))).then((r) => r.flat());
@@ -156,8 +159,13 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const res = await mc(up, calls);
   const at = (tk: string, k: number) => (res[slots.get(tk)! + k] ?? undefined) as (readonly bigint[] & bigint) | undefined;
 
-  // v3/v4: the tick bitmap words around the price, then the liquidityNet of every initialized tick found in the band
-  const walks = [...P.values()].filter((p) => p.venue !== "v2" && p.spacing > 0 && at(p.token, 0) && at(p.token, 1) != null).map((p) => {
+  // v3/v4: the tick bitmap words around the price, then the liquidityNet of every initialized tick found in the band.
+  // Positions change far less often than the price, so a pool's ticks are reused for 2 minutes (or until its tick moves
+  // a tenth of the band); price, tick and active liquidity are read fresh every time. A cold batch of 120 tokens took
+  // 84 eth_calls of ~320K calldata words (a spacing-1 pool needs 721 bitmap words), 4.3 s on a busy node (2026-10-31).
+  const now = Date.now(), live = [...P.values()].filter((p) => p.venue !== "v2" && p.spacing > 0 && at(p.token, 0) && at(p.token, 1) != null);
+  const fresh = (p: Pool) => { const c = ticks.get(p.pool); return c && now - c.at < 120_000 && Math.abs(Number(at(p.token, 0)![1]) - c.tick) < BAND / 10 ? c : null; };
+  const walks = live.filter((p) => !fresh(p)).map((p) => {
     const tick = Number(at(p.token, 0)![1]), lo = Math.max(-MAX_TICK, tick - BAND), hi = Math.min(MAX_TICK, tick + BAND);
     const word = (t: number) => Math.floor(t / p.spacing) >> 8, words: number[] = [];
     for (let w = word(lo); w <= word(hi); w++) words.push(w);
@@ -178,10 +186,15 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const tls = await mc(up, walks.flatMap(({ p, ticks }) => ticks.map((t): Call =>
     v4(p) ? { target: V4_STATE_VIEW, abi: SV, fn: "getTickLiquidity", args: [p.pool, t] } : { target: p.pool, abi: V3, fn: "ticks", args: [t] })));
   k = 0;
-  const bands = new Map<string, [number, number]>();
   for (const wk of walks) {
     for (const t of wk.ticks) { const r = tls[k++] as readonly bigint[] | null; if (r == null) wk.ok = false; else wk.net.set(t, r[1]); }
-    if (wk.ok) bands.set(wk.p.token, band(at(wk.p.token, 0)![0], wk.tick, at(wk.p.token, 1)!, wk.net, wk.lo, wk.hi));
+    if (wk.ok) ticks.set(wk.p.pool, { at: now, tick: wk.tick, lo: wk.lo, hi: wk.hi, net: wk.net });
+  }
+  if (ticks.size > 20_000) ticks.clear();
+  const bands = new Map<string, [number, number]>();
+  for (const p of live) {
+    const c = fresh(p), tick = Number(at(p.token, 0)![1]);
+    if (c) bands.set(p.token, band(at(p.token, 0)![0], tick, at(p.token, 1)!, c.net, Math.max(c.lo, tick - BAND), Math.min(c.hi, tick + BAND)));
   }
 
   const out = new Map<string, Card>();
