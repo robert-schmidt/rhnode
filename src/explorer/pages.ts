@@ -5,6 +5,9 @@ import { rows } from "../ch.ts";
 import { ago, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
 import { bare, lookup, methods } from "./names.ts";
 import { requested } from "../watch.ts";
+import { cards, NET24 } from "../cards.ts";
+import { PROTOCOL } from "../chain/protocol.ts";
+import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 export type Rpc = (method: string, params: unknown[]) => Promise<{ result?: unknown; error?: { message: string } }>;
 export type Page = { status: number; title: string; body: Html; immutable?: boolean; redirect?: string; refresh?: number };
@@ -323,7 +326,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
     : "");
   const [tmeta, names, token] = await Promise.all([
     tokens(tfs.map((t) => t.token)), methods(rpc, txs.map((t) => ({ to: t.to || null, input: t.created ? "" : t.selector }))),
-    tok ? tokenSection(a, tok) : Promise.resolve(html``),
+    tok ? tokenSection(rpc, a, tok) : Promise.resolve(html``),
   ]);
   const title = tok ? `${tok.name || tok.symbol || "Token"} (${tok.symbol})` : isContract ? "Contract" : "Address";
   return { status: 200, title: `${title} ${short(a)}`, refresh: cov.from && !txb && !tfb ? 60 : undefined, body: html`
@@ -360,31 +363,68 @@ const edges = (es: Edge[], hash: Map<string, string>, who: (e: Edge) => Html | s
 ${es.map((e) => { const h = hash.get(`${e.block}:${e.tx_index}`); return html`<tr><td>${h ? link("tx", h) : link("block", e.block)}</td><td>${when(e.ts)}</td>
 <td>${who(e)}${BRIDGE[e.type] ? html` <span class="tag">${BRIDGE[e.type]}</span>` : ""}</td><td>${value(e.v)}</td></tr>`; })}</table></div>`;
 
-async function tokenSection(t: string, tok: Token): Promise<Html> {
-  const [holders, pools] = await Promise.all([
+// A token card (cards.ts) as the explorer shows it
+type View = {
+  complete: boolean; circulating_supply: string | null; locked_supply: string | null; burned_supply: string | null;
+  top10: { pct: number | null } | null; creator: string | null; launchpad: string | null; launch_block: number | null;
+  main_pool: { pool: string; venue: string; quote: string; verified: boolean; created_block: number | null; price_usd: number | null;
+    liquidity_usd: number | null; liquidity_quote_usd: number | null } | null;
+  h24: { volume_usd: number; volume_raw_usd: number; buys: number; sells: number; buyers: number; sellers: number };
+};
+const upOf = (rpc: Rpc) => ({ call: <T>(m: string, p: unknown[]) => call<T>(rpc, m, p) });
+const money = (v: number | null | undefined) => (v == null ? "—" : usd(v));
+// wash: most of the gross is same-tx round trips; one-sided: almost none of the pool's tokens are what a seller receives
+const washy = (net: number, raw: number) => raw > 1_000 && raw > 2 * net;
+const QUOTES: Record<string, string> = { [USDG]: "USDG", [WETH]: "WETH", [NATIVE_ETH]: "ETH" };
+
+async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
+  const [card, holders, pools, own] = await Promise.all([
+    cards(upOf(rpc), [t]).then((m) => (m.get(t) ?? null) as View | null),
     rows<{ holder: string; bal: string }>(
       `SELECT holder, toString(sum(balance)) AS bal FROM agg_balances WHERE token = {t:String} AND holder != {z:String} GROUP BY holder HAVING sum(balance) > 0
        ORDER BY sum(balance) DESC LIMIT 20`, { t, z: ZERO }),
-    rows<{ pl: string; v: string; q: string; vol: number; hk: string; vf: number }>(
-      `SELECT c.pool AS pl, toString(p.venue) AS v, c.q AS q, c.vol AS vol, p.hooks AS hk, p.verified AS vf
-       FROM (SELECT pool, any(quote) AS q, sum(volume_usd) AS vol FROM agg_candles_1m WHERE token = {t:String} AND minute > now() - INTERVAL 1 DAY GROUP BY pool) AS c
-       INNER JOIN (SELECT * FROM pools FINAL) AS p ON p.pool = c.pool ORDER BY vol DESC LIMIT 10`, { t }),
+    rows<{ pl: string; v: string; q: string; vol: number; raw: number; hk: string; vf: number }>(
+      `SELECT n.pool AS pl, toString(p.venue) AS v, n.q AS q, n.nv AS vol, n.rv AS raw, p.hooks AS hk, p.verified AS vf
+       FROM (${NET24}) AS n INNER JOIN (SELECT * FROM pools FINAL) AS p ON p.pool = n.pool ORDER BY vol DESC, raw DESC LIMIT 10`, { t: [t] }),
+    rows<{ pool: string; hooks: string }>("SELECT pool, hooks FROM pools FINAL WHERE token0 = {t:String} OR token1 = {t:String}", { t }),
   ]);
-  const best = pools.find((p) => p.vf === 1);
-  const chart = best ? await rows<{ h: number; c: number }>(
+  const mp = card?.main_pool ?? null, d = card?.h24;
+  const chartPool = mp?.pool ?? pools.find((p) => p.vf === 1)?.pl;
+  const chart = chartPool ? await rows<{ h: number; c: number }>(
     `SELECT toUnixTimestamp(toStartOfHour(m)) AS h, argMax(cu, m) AS c FROM (
        SELECT minute AS m, argMaxMerge(close_usd) AS cu FROM agg_candles_1m WHERE token = {t:String} AND pool = {p:String}
-         AND minute > now() - INTERVAL 7 DAY GROUP BY minute) WHERE cu > 0 GROUP BY h ORDER BY h`, { t, p: best.pl }) : [];
-  const supply = BigInt(tok.supply || "0");
-  return html`<h2>Token</h2><dl><dt>Name</dt><dd>${tok.name}</dd><dt>Symbol</dt><dd>${tok.symbol}</dd><dt>Decimals</dt><dd>${tok.decimals}</dd>
-<dt>Total supply</dt><dd>${units(supply, tok.decimals, 2)}</dd><dt>Holders</dt><dd>${Number(tok.holder_count).toLocaleString("en-US")}${tok.complete ? "" : html` <span class="muted small">(counted from our history; incomplete for tokens older than it)</span>`}</dd>
-${chart.length ? html`<dt>Price</dt><dd>${usd(chart.at(-1)!.c)}</dd>` : ""}</dl>
-${best ? html`<h3>Price, last 7 days <span class="muted small">(hourly close, pool ${short(best.pl)})</span></h3>${sparkline(chart.map((r) => [r.h, r.c]))}` : ""}
-${pools.length ? html`<h3>Pools (24 h)</h3><div class="tw"><table><tr><th>Pool</th><th>Venue</th><th>Quote</th><th>Volume</th><th></th></tr>
-${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${p.q === ZERO ? "ETH" : link("address", p.q)}</td><td>${usd(p.vol)}</td>
-<td>${p.vf ? "" : html`<span class="bad small">unverified</span>`} ${p.hk && !/^0x0*$/.test(p.hk) ? html`<span class="tag">hook</span>` : ""}</td></tr>`)}</table></div>` : ""}
-${holders.length ? html`<h3>Top holders</h3><div class="tw"><table><tr><th>Holder</th><th>Balance</th><th>Share</th></tr>
-${holders.map((h) => html`<tr><td>${link("address", h.holder)}</td><td>${units(h.bal, tok.decimals, 2)}</td><td>${supply > 0n ? `${(Number((BigInt(h.bal) * 10000n) / supply) / 100).toFixed(2)}%` : ""}</td></tr>`)}</table></div>` : ""}`;
+         AND minute > now() - INTERVAL 7 DAY GROUP BY minute) WHERE cu > 0 GROUP BY h ORDER BY h`, { t, p: chartPool }) : [];
+  const supply = BigInt(tok.supply || "0"), amt = (v: string | null) => (v == null ? "—" : units(BigInt(v), tok.decimals, 2));
+  const ownSet = new Set(own.flatMap((p) => [p.pool, p.hooks]));
+  const quote = (q: string) => (QUOTES[q] ? link("address", q, QUOTES[q]) : link("address", q));
+  const oneSided = mp?.liquidity_usd != null && mp.liquidity_quote_usd != null && mp.liquidity_usd > 1_000 && mp.liquidity_quote_usd < 0.05 * mp.liquidity_usd;
+  const wash = d ? washy(d.volume_usd, d.volume_raw_usd) : false;
+  const what = (a: string) => { const e = PROTOCOL.get(a); return e ? html`<span class="tag">${e.label}</span>` : ownSet.has(a) ? html`<span class="tag">pool</span>` : a === t ? html`<span class="tag">token contract</span>` : ""; };
+  const tile = (v: unknown, k: unknown) => html`<div><b>${v}</b><span>${k}</span></div>`;
+  return html`<h2>Token</h2>
+<div class="stats">${tile(money(mp?.price_usd), "price, main pool")}
+${tile(money(mp?.liquidity_quote_usd), html`sell-side liquidity${oneSided ? html` <span class="bad">one-sided</span>` : ""}`)}
+${tile(money(d?.volume_usd), html`24 h volume${wash ? html` <span class="bad">wash: ${usd(d!.volume_raw_usd)} gross</span>` : ""}`)}
+${tile(Number(tok.holder_count).toLocaleString("en-US"), card?.complete ? "holders" : "holders (since our history)")}
+${card?.top10?.pct != null ? tile(`${card.top10.pct.toFixed(2)}%`, "held by the top 10") : ""}</div>
+${oneSided || wash ? html`<p class="note small">${oneSided ? html`<b>One-sided pool:</b> it holds ${usd(mp!.liquidity_usd!)} in all, but only ${usd(mp!.liquidity_quote_usd!)} of it is ${QUOTES[mp!.quote] ?? "the quote asset"}, which is what a seller receives. ` : ""}${wash
+  ? html`<b>Wash trading:</b> ${usd(d!.volume_raw_usd)} of swaps in 24 h, but buys and sells inside the same transactions cancel out to ${usd(d!.volume_usd)}.` : ""}</p>` : ""}
+<dl><dt>Name</dt><dd>${tok.name}</dd><dt>Symbol</dt><dd>${tok.symbol}</dd><dt>Decimals</dt><dd>${tok.decimals}</dd>
+<dt>Total supply</dt><dd>${units(supply, tok.decimals, 2)}</dd>
+${card?.complete ? html`<dt>Circulating</dt><dd>${amt(card.circulating_supply)} <span class="muted small">(locked ${amt(card.locked_supply)}, burned ${amt(card.burned_supply)})</span></dd>`
+  : html`<dt>Circulating</dt><dd><span class="muted small">Holders are counted from our history; circulating supply and the top 10 come once the token's older history is indexed.</span></dd>`}
+${card?.launch_block ? html`<dt>Launched</dt><dd>${card.launchpad ? html`<span class="tag">${card.launchpad}</span> ` : ""}in block ${link("block", card.launch_block)}${card.creator ? html` by ${link("address", card.creator)}` : ""}</dd>` : ""}
+${mp ? html`<dt>Main pool</dt><dd><span class="mono">${short(mp.pool)}</span> <span class="tag">${mp.venue}</span> against ${quote(mp.quote)}${mp.verified ? "" : html` <span class="bad small">unverified</span>`}
+<span class="muted small">liquidity ${money(mp.liquidity_usd)} in all, ${money(mp.liquidity_quote_usd)} on the sell side</span></dd>` : ""}
+${d ? html`<dt>Trades, 24 h</dt><dd>${d.buys.toLocaleString("en-US")} buys by ${d.buyers.toLocaleString("en-US")} wallets, ${d.sells.toLocaleString("en-US")} sells by ${d.sellers.toLocaleString("en-US")}</dd>` : ""}</dl>
+${chart.length ? html`<h3>Price, last 7 days <span class="muted small">(hourly close, pool ${short(chartPool!)})</span></h3>${sparkline(chart.map((r) => [r.h, r.c]))}` : ""}
+${pools.length ? html`<h3>Pools (24 h)</h3><div class="tw"><table><tr><th>Pool</th><th>Venue</th><th>Quote</th><th class="num">Volume</th><th class="num">Gross</th><th></th></tr>
+${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${quote(p.q)}</td><td class="num">${usd(p.vol)}</td><td class="num muted">${usd(p.raw)}</td>
+<td>${p.pl === mp?.pool ? html`<span class="tag">main</span> ` : ""}${p.vf ? "" : html`<span class="bad small">unverified</span> `}${washy(p.vol, p.raw) ? html`<span class="bad small">wash</span> ` : ""}${p.hk && !/^0x0*$/.test(p.hk) ? html`<span class="tag">hook</span>` : ""}</td></tr>`)}</table></div>
+<p class="muted small">Volume is net: a transaction's buys and sells in one pool cancel, so round trips (wash trading) count for nothing; Gross counts every swap. Sell-side liquidity is the ETH or USDG a seller can receive from the main pool within ×/÷10,000 of the price.</p>` : ""}
+${holders.length ? html`<h3>Top holders</h3><div class="tw"><table><tr><th>Holder</th><th></th><th>Balance</th><th>Share</th></tr>
+${holders.map((h) => html`<tr><td>${link("address", h.holder)}</td><td>${what(h.holder)}</td><td>${units(h.bal, tok.decimals, 2)}</td><td>${supply > 0n ? `${(Number((BigInt(h.bal) * 10000n) / supply) / 100).toFixed(2)}%` : ""}</td></tr>`)}</table></div>
+<p class="muted small">The top 10 share leaves out pools, lockers, burn addresses and other protocol contracts.</p>` : ""}`;
 }
 
 // --- search ---

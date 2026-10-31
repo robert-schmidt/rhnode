@@ -22,7 +22,7 @@ const RETRY_FAILED_SEC = 3600;
 const V4_PER_TICK = 50;
 
 export type Call = { target: string; abi: Abi; fn: string; args?: unknown[] };
-export async function multicall(up: Client, calls: Call[]): Promise<unknown[]> {
+export async function multicall(up: Pick<Client, "call">, calls: Call[]): Promise<unknown[]> {
   if (!calls.length) return [];
   const data = encodeFunctionData({ abi: MC, functionName: "aggregate3", args: [calls.map((c) => ({
     target: c.target as `0x${string}`, allowFailure: true,
