@@ -407,7 +407,7 @@ ${es.map((e) => { const h = hash.get(`${e.block}:${e.tx_index}`); return html`<t
 // A token card (cards.ts) as the explorer shows it
 type View = {
   complete: boolean; circulating_supply: string | null; locked_supply: string | null; burned_supply: string | null;
-  top10: { pct: number | null } | null; creator: string | null; launchpad: string | null; launch_block: number | null;
+  top10: { pct: number | null } | null; fdv_usd: number | null; market_cap_usd: number | null; creator: string | null; launchpad: string | null; launch_block: number | null;
   main_pool: { pool: string; venue: string; quote: string; verified: boolean; created_block: number | null; price_usd: number | null;
     liquidity_usd: number | null; liquidity_quote_usd: number | null } | null;
   h24: { volume_usd: number; volume_raw_usd: number; buys: number; sells: number; buyers: number; sellers: number; top_wallet: { wallet: string; share: number } | null };
@@ -446,18 +446,22 @@ async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
   const supply = BigInt(tok.supply || "0"), amt = (v: string | null) => (v == null ? "—" : units(BigInt(v), tok.decimals, 2));
   const ownSet = new Set(own.flatMap((p) => [p.pool, p.hooks]));
   const quote = (q: string) => (QUOTES[q] ? link("address", q, QUOTES[q]) : link("address", q));
-  const oneSided = mp?.liquidity_usd != null && mp.liquidity_quote_usd != null && mp.liquidity_usd > 1_000 && mp.liquidity_quote_usd < 0.05 * mp.liquidity_usd;
+  // a price nobody can sell into: the main pool pays a seller under 1% of the FDV it implies
+  const thin = card?.fdv_usd != null && card.fdv_usd > 10_000 && (mp?.liquidity_quote_usd ?? 0) < 0.01 * card.fdv_usd;
+  const oneSided = !thin && mp?.liquidity_usd != null && mp.liquidity_quote_usd != null && mp.liquidity_usd > 1_000 && mp.liquidity_quote_usd < 0.05 * mp.liquidity_usd;
   const wash = d ? washy(d.volume_usd, d.volume_raw_usd) : false;
   const one = d?.top_wallet && d.top_wallet.share >= 0.5 && d.volume_usd > 10_000 ? d.top_wallet : null; // one wallet makes the market
   const what = (a: string) => lab.has(a) ? flag(lab.get(a)) : ownSet.has(a) ? html`<span class="tag">pool</span>` : a === t ? html`<span class="tag">token contract</span>` : "";
   const tile = (v: unknown, k: unknown) => html`<div><b>${v}</b><span>${k}</span></div>`;
   return html`<h2>Token</h2>
 <div class="stats">${tile(money(mp?.price_usd), "price, main pool")}
-${tile(money(mp?.liquidity_quote_usd), html`sell-side liquidity${oneSided ? html` <span class="bad">one-sided</span>` : ""}`)}
+${tile(money(card?.market_cap_usd ?? card?.fdv_usd), card?.market_cap_usd != null ? "market cap" : "FDV (price × supply)")}
+${tile(money(mp?.liquidity_quote_usd), html`sell-side liquidity${thin ? html` <span class="bad">thin</span>` : oneSided ? html` <span class="bad">one-sided</span>` : ""}`)}
 ${tile(money(d?.volume_usd), html`24 h volume${wash ? html` <span class="bad">wash: ${usd(d!.volume_raw_usd)} gross</span>` : one ? html` <span class="bad">${Math.round(one.share * 100)}% one wallet</span>` : ""}`)}
 ${tile(Number(tok.holder_count).toLocaleString("en-US"), card?.complete ? "holders" : "holders (since our history)")}
 ${card?.top10?.pct != null ? tile(`${card.top10.pct.toFixed(2)}%`, "held by the top 10") : ""}</div>
-${oneSided || wash || one ? html`<p class="note small">${oneSided ? html`<b>One-sided pool:</b> it holds ${usd(mp!.liquidity_usd!)} in all, but only ${usd(mp!.liquidity_quote_usd!)} of it is ${QUOTES[mp!.quote] ?? "the quote asset"}, which is what a seller receives. ` : ""}${wash
+${thin || oneSided || wash || one ? html`<p class="note small">${thin
+  ? html`<b>Thin liquidity:</b> the last price values the token at ${usd(card!.fdv_usd!)} (FDV), but a seller can get only ${usd(mp?.liquidity_quote_usd ?? 0)} out of its main pool. The price says little about what the token is worth: typical of a rug, a dead pool or a pumped micro-pool. ` : ""}${oneSided ? html`<b>One-sided pool:</b> it holds ${usd(mp!.liquidity_usd!)} in all, but only ${usd(mp!.liquidity_quote_usd!)} of it is ${QUOTES[mp!.quote] ?? "the quote asset"}, which is what a seller receives. ` : ""}${wash
   ? html`<b>Wash trading:</b> ${usd(d!.volume_raw_usd)} of swaps in 24 h, but buys and sells inside the same transactions cancel out to ${usd(d!.volume_usd)}. ` : ""}${one
   ? html`<b>One wallet:</b> ${link("address", one.wallet)} made ${(one.share * 100).toFixed(1)}% of the 24 h trading.` : ""}</p>` : ""}
 <dl><dt>Name</dt><dd>${tok.name}</dd><dt>Symbol</dt><dd>${tok.symbol}</dd><dt>Decimals</dt><dd>${tok.decimals}</dd>

@@ -12,6 +12,8 @@
 // - h24/h6/h1 buys/sells/buyers/sellers by the trader (ev_trades), volume (net and raw) from priced swaps; price_change_pct
 //   the main pool's price now against its last 1-minute close 1/6/24 h ago (null with no trade before); top_wallet is the
 //   trader with the most 24 h trade USD and its share (wash across many txs by one wallet shows as a share near 1);
+// - fdv_usd is the main pool's price times total supply, market_cap_usd times circulating supply (complete tokens only);
+//   set against liquidity_quote_usd they show a price nobody can sell into (a $1 pool pricing a token at millions);
 // - block is what ingest holds; price_block the projector's cursor (prices, trades, candles, volumes are as of it: a
 //   stalled projector shows as price_block falling behind block);
 // - anything not known is null, never 0 (a token whose history isn't complete has null holder fields).
@@ -247,10 +249,12 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
         volume_24h_usd: Math.round(p.v24 * 100) / 100, volume_24h_raw_usd: Math.round(p.raw24 * 100) / 100,
       };
     }
-    const lc = L.get(tk), tr = T.get(tk);
+    const lc = L.get(tk), tr = T.get(tk), pu = (main?.price_usd as number | null) ?? null;
+    const usdOf = (raw: bigint) => (pu == null || dec == null ? null : Math.round(Number(raw) / 10 ** dec * pu * 100) / 100);
     out.set(tk, {
       token: tk, name: m.name, symbol: m.symbol, decimals: dec, total_supply: m.supply, complete,
       circulating_supply: complete ? (supply - burned - locked - pad).toString() : null,
+      fdv_usd: usdOf(supply), market_cap_usd: complete ? usdOf(supply - burned - locked - pad) : null,
       locked_supply: complete ? locked.toString() : null, burned_supply: complete ? burned.toString() : null,
       holder_count: complete ? Number(m.holders) : null,
       top10: complete ? { amount: (top10 ? BigInt(top10.top) : 0n).toString(), pct: pct(top10 ? BigInt(top10.top) : 0n, supply) } : null,
