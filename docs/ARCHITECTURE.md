@@ -263,7 +263,7 @@ A bot's shortlist, held tokens, tracked pools and own wallets become watchlists.
   RPC tx- and log-for-log, no gaps; one duplicated batch from the async-insert era (fixed above); a 1,000-block re-run after the
   fix added 0 raw/ev rows. Disk: 7.2 GiB/day for every table (raw_txs 34%, raw_logs 27%). Upstreams: ~20 req/s of ~40;
   the official RPC errors ~9% (head lag), absorbed by the rotation. RAM: ClickHouse 1.2–2.4 GB, ingest ~130 MB, projector ~110 MB.
-- **Not built in M1:** `INGEST_SCOPE=watched` and `TRACES=tip` (ingest refuses to start with them), reorg rollback (a parent
+- **Not built in M1:** `INGEST_SCOPE=watched` (ingest refuses to start with it; `TRACES=tip` landed 2026-10-31, src/ingest/traces.ts), reorg rollback (a parent
   mismatch halts ingest; M2), `ev_locks`/`ev_liquidity`/`ev_trades` (M2), Pons fee-vault matching for `LOCKS`.
 
 ## 5. Reorgs and finality
@@ -355,7 +355,7 @@ and "proper box" is configuration:
 |---|---|---|
 | `UPSTREAM_HTTP` / `UPSTREAM_WS` | free endpoint lists with rotation + backoff (official RPC; dRPC → PublicNode WS) | our Nitro node on localhost |
 | `INGEST_SCOPE` | `watched`: WS log filters for watchlists + launchpads/factories + Relay routers + tracked pools; `eth_getLogs` backfill by **token address** (the official RPC does 10M-block address-filtered spans) | `all`: every block, tx, log, receipt |
-| `TRACES` | `off` ("who acted" falls back to signer/userOp; unknown otherwise) | `tip` (callTracer per block) |
+| `TRACES` | `off` ("who acted" falls back to signer/userOp; unknown otherwise) | `tip` (callTracer per block on `NITRO_HTTP`, into `raw_traces` for RAW_TTL_DAYS; gaps in `ctl_trace_gaps`) |
 | `RAW_TTL_DAYS` | 3 (only watched-scope rows exist anyway) | 14 |
 | ClickHouse | single native install, `max_server_memory_usage` ≈ 3 GB, small mark/uncompressed caches | sized to the box |
 | Redis | the existing server's Redis, own DB index + `rh:` prefix | own instance |

@@ -17,7 +17,8 @@ No API keys, no paid providers. Runs on a 32 GB mini PC (measured: ~100 Mgas/s c
 | M1 tip ingest of every block → `raw_*` + decoded `ev_*` (transfers, swaps, pools, launches, Relay fills), keep bits, reorg rollback | ✅ |
 | M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices + 1m candles, wallet trades | in progress |
 | Token promotion: a token older than go-live gets its whole history once, on first request (`src/promoter`) | ✅ |
-| History pass: every block from go-live back to genesis on your own node, read once and decoded by the ingest decoder (`HISTORY=1`); kept forever: ERC-20 transfers and balances, swaps, launches, pools, Relay fills, every wallet's txs and ETH transfers | built, starts after sync |
+| Tip traces: every call frame of every tx, taken at the tip on your own node (`TRACES=tip`), kept 14 days for the stream and tx trace lookups | built |
+| History pass: every block from go-live back to genesis on your own node, read once and decoded by the ingest decoder (`HISTORY=1`); kept forever: ERC-20 transfers and balances, swaps, launches, pools, Relay fills, every wallet's txs and ETH transfers | running since 2026-10-31 |
 | Prices, 1m candles and wallet trades before go-live, derived from what the history pass keeps (no further node reads) | next |
 | M3 API: `/rpc`, `/ws`, Blockscout-compatible `/api`, API keys (a separate service since 2026-10-30) | ✅ |
 | M4 `/v1/stream` with resume, watchlists | planned |

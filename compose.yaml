@@ -37,6 +37,7 @@ services:
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      NITRO_HTTP: http://nitro:8547 # TRACES=tip traces our own node only (src/ingest/traces.ts)
     depends_on:
       clickhouse: { condition: service_healthy }
 

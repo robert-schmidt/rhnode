@@ -26,6 +26,10 @@ that read the chain, and gives more insight than either.
   node work, and every event type. Concurrency adapts to ingest/node lag. Its floor is ctl_cursors 'walk' (`exactFrom`
   in /health, token promotion's top) and 'scan' (explorer coverage). Prices/candles/trades before go-live are derived
   afterwards from the kept rows (next). A refused wallet is answered asynchronously (503 "promotion queued").
+- **Tip traces (2026-10-31):** our node keeps ~1,200 blocks of state, so traces are taken at the tip or never.
+  With TRACES=tip, src/ingest/traces.ts traces every stored block by hash (callTracer, ~22 ms a block) one batch behind
+  ingest, into raw_traces (every frame, reverted ones too, RAW_TTL_DAYS) for the stream's replay and the API's tx trace.
+  Falling >1,000 blocks behind records a gap (ctl_trace_gaps) instead of stalling. Internal ETH kept forever: open.
 - **Wallet txs, all wallets (2026-10-30):** idx_wallet_txs points every wallet at its txs
   (migration 015: from go-live by a view on raw_txs, below it by the history pass). The explorer reads txs through it (ClickHouse, else the node).
 - **ETH funding graph (2026-10-30):** native_edges (+ native_edges_by_src) keep every top-level ETH transfer forever

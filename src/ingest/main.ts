@@ -13,6 +13,7 @@ import { decodeBlock, emptyRows, type RpcBlock, type RpcReceipt, type Rows } fro
 import { learn, loadCtx, type KeepCtx } from "./keep.ts";
 import { findFork, REORG_DEPTH, rollback, storedHash } from "./reorg.ts";
 import { BLOCKS, connect } from "../bus.ts";
+import { TRACES, traceLoop } from "./traces.ts";
 
 const hex = (n: number) => "0x" + n.toString(16);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -83,6 +84,7 @@ async function tip(up: Client) {
   let ctx = await loadCtx(windowSec), ctxAt = Date.now();
   const report = reporter(up);
   const bus = await connect();
+  if (cfg.traces === "tip") void traceLoop(process.env.NITRO_HTTP!, (m) => bus ? bus.publish(TRACES, m) : Promise.resolve());
   console.log(`[ingest] tip from ${next} (${cur ? "cursor" : "cold start"}), batch ${B}, ttl ${cfg.rawTtlDays}d, upstreams ${up.stats().map((s) => s.host).join(", ")}`);
   // While behind, the next AHEAD whole batches are fetched while this one is decoded and inserted: one batch at a time
   // only just kept pace with the chain on the public endpoints (lag stuck at ~1,000 blocks, 2026-10-30). Inserts stay
@@ -143,7 +145,7 @@ async function backfill(up: Client, from: number, to: number) {
 
 if (import.meta.main) {
   if (cfg.ingestScope !== "all") throw new Error("INGEST_SCOPE=watched is not built yet (lite profile, after M1). Set INGEST_SCOPE=all.");
-  if (cfg.traces !== "off") throw new Error("TRACES=tip needs our own node (M6). Set TRACES=off.");
+  if (cfg.traces === "tip" && !process.env.NITRO_HTTP) throw new Error("TRACES=tip needs NITRO_HTTP (our own node: traces need its recent state)");
   await migrate();
   const up = upstream(cfg.upstreamHttp);
   const [cmd, a, b] = process.argv.slice(2);

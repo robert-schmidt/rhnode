@@ -9,7 +9,7 @@ import { ch, rows } from "../ch.ts";
 
 // ev_prices/ev_trades are written by the projector; rolled back the same way, and the projector cursor rewinds with it.
 const EV = ["ev_transfers", "ev_native", "ev_swaps", "ev_pools", "ev_launches", "ev_relay", "ev_prices", "ev_trades"];
-const RAW = ["raw_txs", "raw_logs"];
+const RAW = ["raw_txs", "raw_logs", "raw_traces"];
 const KEPT = ["kept_txs", "kept_logs", "kept_transfers", "kept_transfers_by_wallet", "kept_native", "kept_swaps", "kept_pools", "kept_launches", "kept_relay", "kept_trades", "contracts",
   // views on raw_txs (migrations 015, 016): their rows of dropped blocks would point at, or fund from, txs that never were
   "idx_wallet_txs", "native_edges", "native_edges_by_src"];
@@ -38,6 +38,9 @@ export async function rollback(from: number, tag: string): Promise<void> {
   // The projector derived rows from the dropped blocks: send it back to re-derive the new branch.
   const p = (await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'projector'"))[0];
   if (p && Number(p.block) >= from) await ch.insert({ table: "ctl_cursors", values: [{ name: "projector", block: from - 1, hash: "", version: Date.now() }], format: "JSONEachRow" });
+  // So does the tracer (traces.ts): the new branch's blocks are traced again.
+  const t = (await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'trace'"))[0];
+  if (t && Number(t.block) >= from) await ch.insert({ table: "ctl_cursors", values: [{ name: "trace", block: from - 1, hash: "", version: Date.now() }], format: "JSONEachRow" });
 }
 
 /** Step 1: re-insert every ev_* row ≥ from with sign -1, so the aggregates subtract it. */
