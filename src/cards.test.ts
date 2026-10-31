@@ -44,3 +44,10 @@ test("poolState curve: price is the last trade, liquidity the quote the curve re
   assert.deepEqual([m.price, m.liquidityUsd, m.quoteUsd, m.kind], [1e-6, 6000, 6000, "curve"]);
   assert.equal(poolState("curve", true, 18, 18, 3000, {}), null, "no balance read");
 });
+
+test("poolState: a Metric OMM pool's price is its last trade, its liquidity both balances", () => {
+  // token is token0: 1M TOKEN and 50,000 USDG held, last trade 0.04 USDG a token → $40,000 + $50,000
+  const m = poolState("omm", true, 18, 6, 1, { b0: 10n ** 24n, b1: 5n * 10n ** 10n, last: 0.04 })!;
+  assert.equal(m.price, 0.04); near(m.liquidityUsd, 90_000); near(m.quoteUsd, 50_000); assert.equal(m.kind, "balances");
+  assert.equal(poolState("omm", true, 18, 6, 1, { b0: 10n ** 24n, b1: 5n * 10n ** 10n })!.liquidityUsd, null); // no trade yet
+});

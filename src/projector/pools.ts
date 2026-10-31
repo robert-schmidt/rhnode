@@ -1,8 +1,9 @@
 // Pool identity for pools that trade now but were created before go-live (§4.2). Never trusts the swap
-// emitter's own word: v2/v3 answers are checked against the factory, v4 pools come from their Initialize log.
+// emitter's own word: v2/v3 answers are checked against the factory, v4 pools come from their Initialize log, Metric OMM
+// pools from getImmutables, verified only when Metric's own factory says isPool.
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type Abi } from "viem";
 import { insert, inSpan, rows, span } from "../ch.ts";
-import { MULTICALL3 } from "../chain/constants.ts";
+import { METRIC_OMM_FACTORY, MULTICALL3 } from "../chain/constants.ts";
 import { registryEntries } from "../chain/registry.ts";
 import type { Client } from "../chain/upstream.ts";
 
@@ -17,6 +18,9 @@ const FACTORY = parseAbi([
 ]);
 // Forks keyed by tick spacing (Slipstream-style CLFactory and others): getPool(token0, token1, int24 tickSpacing).
 const FACTORY_TS = parseAbi(["function getPool(address, address, int24) view returns (address)"]);
+const OMM = parseAbi(["struct I { address factory; address token0; address token1; uint256 s0; uint256 s1; uint256 i0; uint256 i1; uint256 minLiq; address provider; int256 lo; int256 hi; address e1; address e2; address e3; address e4; address e5; address e6; address e7; uint256 o1; uint256 o2; uint256 o3; uint256 o4; uint256 o5; uint256 o6; }",
+  "function getImmutables() view returns (I)"]);
+const OMM_FACTORY = parseAbi(["function isPool(address) view returns (bool)"]);
 const INITIALIZE = registryEntries.find((e) => e.key === "univ4:Initialize")!.topic0;
 const RETRY_FAILED_SEC = 3600;
 const V4_PER_TICK = 50;
@@ -73,6 +77,25 @@ async function resolveV23(up: Client, pools: { pool: string; venue: string }[]):
   return out;
 }
 
+/** Metric OMM: the pool's immutables, verified when Metric's factory is the one it names and that factory vouches for it. */
+async function resolveOmm(up: Client, pools: { pool: string }[]): Promise<Row[]> {
+  const out: Row[] = [];
+  for (let i = 0; i < pools.length; i += 100) {
+    const part = pools.slice(i, i + 100);
+    const [im, ok] = await Promise.all([multicall(up, part.map(({ pool }) => ({ target: pool, abi: OMM, fn: "getImmutables" }))),
+      multicall(up, part.map(({ pool }) => ({ target: METRIC_OMM_FACTORY, abi: OMM_FACTORY, fn: "isPool", args: [pool] })))]);
+    part.forEach(({ pool }, j) => {
+      const m = im[j] as { factory: string; token0: string; token1: string } | null;
+      if (!m) { out.push(failed(pool, "omm", pool)); return; }
+      out.push({
+        pool, venue: "omm", manager: pool, token0: lc(m.token0), token1: lc(m.token1), fee: 0, tick_spacing: 0, hooks: "", factory: lc(m.factory),
+        created_block: 0, created_time: 0, source: "lookup", verified: lc(m.factory) === METRIC_OMM_FACTORY && ok[j] === true ? 1 : 0, ok: 1, version: Date.now(),
+      });
+    });
+  }
+  return out;
+}
+
 type InitLog = { topics: string[]; data: string; blockNumber: string; blockTimestamp?: string };
 
 /** v4: the pool's Initialize log on its manager, one whole-range eth_getLogs. */
@@ -101,9 +124,9 @@ export async function resolvePools(up: Client, lookup: Client, from: number, to:
      GROUP BY pool`,
     { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000 },
   )).map(({ vn, ...u }) => ({ ...u, venue: vn }));
-  const v23 = await resolveV23(up, unknown.filter((u) => u.venue !== "v4"));
+  const v23 = await resolveV23(up, unknown.filter((u) => u.venue === "v2" || u.venue === "v3"));
   const v4 = await Promise.all(unknown.filter((u) => u.venue === "v4").slice(0, V4_PER_TICK).map((u) => resolveV4(lookup, u)));
-  const all = [...v23, ...v4];
+  const all = [...v23, ...v4, ...await resolveOmm(up, unknown.filter((u) => u.venue === "omm"))];
   await insert("pools", all, `lookup:${from}-${to}:${Date.now()}`);
   return { v23: v23.length, v4: v4.length, failed: all.filter((r) => !r.ok).length };
 }

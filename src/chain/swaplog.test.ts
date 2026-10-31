@@ -3,7 +3,7 @@
 // the sign-extension is the part that is easy to get silently wrong.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeSwap, SWAP_V2, SWAP_V3, SWAP_V4, SWAP_PANCAKE_V3, PONS_CURVE_BUY, PONS_CURVE_SELL } from "./swaplog.ts";
+import { decodeSwap, SWAP_V2, SWAP_V3, SWAP_V4, SWAP_PANCAKE_V3, SWAP_METRIC, PONS_CURVE_BUY, PONS_CURVE_SELL } from "./swaplog.ts";
 
 const w = (n: bigint) => (n < 0n ? (1n << 256n) + n : n).toString(16).padStart(64, "0");
 const topicAddr = (a: string) => "0x" + a.slice(2).padStart(64, "0");
@@ -52,4 +52,13 @@ test("PancakeSwap v3: decoded as v3 from its first five words (two protocol-fee 
   const t = (a: string) => "0x" + a.padStart(64, "0");
   const s = decodeSwap({ address: "0xABC", topics: [SWAP_PANCAKE_V3, t("1"), t("2")], data: "0x" + [w(-5n), w(7n), w(1n << 96n), w(10n), w(-3n), w(1n), w(2n)].join("") })!;
   assert.deepEqual([s.venue, s.pool, s.amount0, s.amount1, s.tick], ["v3", "0xabc", -5n, 7n, -3]);
+});
+
+test("decodeSwap: Metric OMM unpacks amountDeltas (amount0 high, amount1 low, pool-side), from 0x88492ce2…", () => {
+  const s = decodeSwap({ address: "0x1E8FC442AD3606719F7016DED6C17B56C3CA7386", topics: [SWAP_METRIC, "0x" + "0".repeat(24) + "8f10b468b06c6fd214b65f87778827f7d113f996", "0x" + "0".repeat(24) + "8f10b468b06c6fd214b65f87778827f7d113f996"],
+    data: "0x0000000000000000000000000000000001fffe8e6e7637f2d3c7c82d65820eb1000000000000000007b9242335fa7b1bffffffffffffffffffffffffb59a54f8000000000000000000001b84c968c40f00000000000000000000000000000000" })!;
+  assert.equal(s.venue, "omm"); assert.equal(s.pool, "0x1e8fc442ad3606719f7016ded6c17b56c3ca7386");
+  assert.equal(s.amount0, 0x07b9242335fa7b1bn); // WETH into the pool (its Transfer leg)
+  assert.equal(s.amount1, -0x4a65ab08n); // USDG out of it
+  assert.equal(s.sqrtPriceX96, null);
 });

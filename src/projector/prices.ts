@@ -1,5 +1,5 @@
 // Swap → price (migrations/004_prices.sql). v3/v4 price is the pool's price AFTER the swap (sqrtPriceX96);
-// v2 and curves have no price word, so it is the swap's execution price (v2: fee included; a curve: fees excluded).
+// v2, curves and Metric OMM pools have no price word, so it is the swap's execution price (v2: fee included; a curve: fees excluded).
 // A pool of two non-quote tokens (a launch paired with a tokenised stock) is priced through a bridge, never more than two
 // hops: the side with its own price against WETH/ETH/USDG in the range is the quote (both: the one with more such volume),
 // at the median of its ≥ $100 swaps in verified quote pools in the range, else its last such price in the BRIDGE_BLOCKS
@@ -31,7 +31,7 @@ export function sides(t0: string, t1: string, bridges?: Map<string, Bridge>): { 
   return null;
 }
 
-export type Swap = { venue: "v2" | "v3" | "v4" | "curve"; a0: string; a1: string; sqrt: string; token0: string; token1: string };
+export type Swap = { venue: "v2" | "v3" | "v4" | "curve" | "omm"; a0: string; a1: string; sqrt: string; token0: string; token1: string };
 
 /** PURE. Trader-side deltas (+ = received), price in quote per token (human units), quote amount. null when
  *  the pool isn't against a quote asset, the token's decimals are unknown, or the swap moved no token. */
@@ -58,13 +58,12 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
 
 let ethUsd: number | null = null;
 
-/** Price every swap in (from, to] whose pool is resolved; returns rows written. curveOnly (src/tools/curve-backfill.ts):
- *  only curve swaps, priced at the ETH/USD the range already holds (its other swaps are priced already). */
-export async function derivePrices(from: number, to: number, curveOnly = false): Promise<number> {
-  const only = curveOnly ? "AND venue = 'curve'" : "";
-  if (curveOnly) {
+/** Price every swap in (from, to] whose pool is resolved; returns rows written. venue (src/tools/venue-backfill.ts): only
+ *  that venue's swaps, priced at the ETH/USD the range already holds (its other swaps are priced already). */
+export async function derivePrices(from: number, to: number, venue?: "curve" | "omm"): Promise<number> {
+  if (venue) {
     const [r] = await rows<{ p: number }>("SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND block > {from:UInt64} - 20000 AND eth_usd > 0 ORDER BY block DESC LIMIT 1", { from, to });
-    return priceRange(from, to, only, Number(r?.p ?? 0) || null);
+    return priceRange(from, to, venue, Number(r?.p ?? 0) || null);
   }
   if (ethUsd === null) {
     ethUsd = Number((await rows<{ p: number }>(
@@ -72,10 +71,11 @@ export async function derivePrices(from: number, to: number, curveOnly = false):
       { w: WETH, n: NATIVE_ETH, u: USDG },
     ))[0]?.p ?? 0) || null;
   }
-  return priceRange(from, to, "", null);
+  return priceRange(from, to, undefined, null);
 }
 
-async function priceRange(from: number, to: number, only: string, fixedEthUsd: number | null): Promise<number> {
+async function priceRange(from: number, to: number, venue: string | undefined, fixedEthUsd: number | null): Promise<number> {
+  const only = venue ? `AND venue = '${venue}'` : "";
   const swaps = await rows<Swap & { block: string; tx_index: number; log_index: number; tx_hash: string; time: string; pool: string; tx_from: string; verified: number }>(
     `SELECT s.block, s.tx_index, s.log_index, s.tx_hash, s.time, s.venue, s.pool, toString(s.amount0) AS a0, toString(s.amount1) AS a1,
        toString(s.sqrt_price_x96) AS sqrt, s.tx_from, p.token0, p.token1, p.verified
@@ -109,7 +109,7 @@ async function priceRange(from: number, to: number, only: string, fixedEthUsd: n
       tx_from: s.tx_from, verified: s.verified, sign: 1,
     });
   }
-  await insert("ev_prices", out, `${only ? "curve-" : ""}prices:${from}-${to}`);
+  await insert("ev_prices", out, `${venue ? venue + "-" : ""}prices:${from}-${to}`);
   return out.length;
 }
 

@@ -1,24 +1,26 @@
-// One-off (2026-10-31): curve trades for the blocks the history pass walked before ingest's decoder knew curves
-// (migration 021): go-live down to where the pass was at that deploy. Per 100K blocks one topic-filtered eth_getLogs on
+// One-off (2026-10-31): a venue's trades for the blocks the history pass walked before ingest's decoder knew it (curves:
+// migration 021; Metric OMM: 023): go-live down to where the pass was at that deploy. Per 100K blocks one topic-filtered eth_getLogs on
 // our node (~15 s, measured 2026-10-31), the signer of each tx (the decoder's tx_from), then hist_swaps → kept_swaps
 // forever, as the pass writes them. kept_swaps replaces by (pool, block, log_index), so overlapping the pass is harmless.
-// `node src/tools/curve-repass.ts <from> <to>`; exits when done.
+// `node src/tools/venue-repass.ts <curve|omm> <from> <to>`; exits when done.
 import { cfg } from "../config.ts";
 import { insert } from "../ch.ts";
 import { upstream } from "../chain/upstream.ts";
-import { decodeSwap, PONS_CURVE_BUY, PONS_CURVE_SELL } from "../chain/swaplog.ts";
+import { decodeSwap, PONS_CURVE_BUY, PONS_CURVE_SELL, SWAP_METRIC } from "../chain/swaplog.ts";
 
 type Log = { address: string; topics: string[]; data: string; blockNumber: string; transactionIndex: string; logIndex: string; transactionHash: string; blockTimestamp: string };
 const up = upstream(cfg.upstreamHttp, { attempts: 4, timeoutMs: 300_000, ordered: true });
 const hex = (n: number) => "0x" + n.toString(16);
-const [from, to] = [Number(process.argv[2]), Number(process.argv[3])];
-if (!(from > 0 && to >= from)) throw new Error("usage: curve-repass.ts <from> <to>");
+const TOPICS = { curve: [PONS_CURVE_BUY, PONS_CURVE_SELL], omm: [SWAP_METRIC] } as const;
+const venue = process.argv[2] as keyof typeof TOPICS, topics = TOPICS[venue];
+const [from, to] = [Number(process.argv[3]), Number(process.argv[4])];
+if (!topics || !(from > 0 && to >= from)) throw new Error("usage: venue-repass.ts <curve|omm> <from> <to>");
 const CHUNK = 100_000, PAR = 32;
 let swaps = 0;
 const t0 = Date.now();
 for (let e = to; e >= from; e -= CHUNK) { // newest first, like the pass
   const b = Math.max(from, e - CHUNK + 1);
-  const logs = await up.call<Log[]>("eth_getLogs", [{ fromBlock: hex(b), toBlock: hex(e), topics: [[PONS_CURVE_BUY, PONS_CURVE_SELL]] }]);
+  const logs = await up.call<Log[]>("eth_getLogs", [{ fromBlock: hex(b), toBlock: hex(e), topics: [[...topics]] }]);
   const txs = [...new Set(logs.map((l) => l.transactionHash.toLowerCase()))], signer = new Map<string, string>();
   for (let i = 0; i < txs.length; i += PAR) {
     await Promise.all(txs.slice(i, i + PAR).map(async (h) => {
@@ -33,7 +35,7 @@ for (let e = to; e >= from; e -= CHUNK) { // newest first, like the pass
       recipient: s.recipient ?? "", tx_from: signer.get(h)!, amount0: s.amount0.toString(), amount1: s.amount1.toString(),
       sqrt_price_x96: "0", liquidity: "0", tick: 0, fee: 0 }] : [];
   });
-  await insert("hist_swaps", out, `curve-repass:${b}-${e}`);
+  await insert("hist_swaps", out, `${venue}-repass:${b}-${e}`);
   swaps += out.length;
   console.log(JSON.stringify({ at: new Date().toISOString(), from: b, swaps, s: Math.round((Date.now() - t0) / 1000) }));
 }

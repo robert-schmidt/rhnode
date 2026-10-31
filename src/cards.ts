@@ -10,7 +10,7 @@
 //   bridge rule in projector/prices.ts); without such a price, the pool has none;
 // - liquidity_usd from the pool's state at the tip: a bonding curve's real quote balance (price: its last trade); v2 reserves; v3 and v4 active liquidity (the tokens the positions
 //   hold within ×/÷10,000 of the price, by a walk over the initialized ticks: a full-range pool gives its reserves, a
-//   one-tick position its real size, not its virtual reserves); liquidity_quote_usd the quote side alone (what a sell
+//   one-tick position its real size, not its virtual reserves); a Metric OMM pool's both balances (price: its last trade); liquidity_quote_usd the quote side alone (what a sell
 //   meets: a one-sided pool has a large liquidity_usd and almost none of it); v3 also liquidity_balances_usd (all it holds);
 // - top10 and circulating leave out protocol addresses (chain/protocol.ts), the token's own pools and hooks, its launchpad curve and
 //   the token contract; lockers are locked_supply, 0xdead burned_supply; pools count as circulating;
@@ -77,7 +77,7 @@ const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) 
 const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
 type Pool = { token: string; pool: string; venue: string; v24: number; raw24: number; v: number; verified: number; official: number; token0: string; token1: string; created_block: string; spacing: number };
-type Mid = { price: number | null; liquidityUsd: number | null; quoteUsd: number | null; kind: "reserves" | "active" | "curve"; balancesUsd: number | null };
+type Mid = { price: number | null; liquidityUsd: number | null; quoteUsd: number | null; kind: "reserves" | "active" | "curve" | "balances"; balancesUsd: number | null };
 
 /** PURE. Price (quote per token, human units) and liquidity from a pool's state at the tip. */
 export function poolState(venue: string, tokenIs0: boolean, dt: number | null, dq: number, quoteUsd: number | null,
@@ -89,6 +89,14 @@ export function poolState(venue: string, tokenIs0: boolean, dt: number | null, d
     if (s.q == null) return null;
     const q = quoteUsd == null ? null : (Number(s.q) / 10 ** dq) * quoteUsd;
     return { price: s.last ?? null, liquidityUsd: q, quoteUsd: q, kind: "curve", balancesUsd: null };
+  }
+  // Metric OMM: the price is an oracle's, so its last trade; liquidity what the pool holds of both tokens
+  if (venue === "omm") {
+    if (s.b0 == null || s.b1 == null) return null;
+    const [bt, bq] = tokenIs0 ? [s.b0, s.b1] : [s.b1, s.b0], last = s.last ?? null;
+    const q = quoteUsd == null ? null : (Number(bq) / 10 ** dq) * quoteUsd;
+    const t = q == null || last == null || dt == null ? null : (Number(bt) / 10 ** dt) * last * quoteUsd!;
+    return { price: last, liquidityUsd: q != null && t != null ? q + t : null, quoteUsd: q, kind: "balances", balancesUsd: null };
   }
   if (venue === "v2") {
     if (!s.r0 || !s.r1) return null;
@@ -205,6 +213,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     if (p.venue === "v2") calls.push({ target: p.pool, abi: V2, fn: "getReserves" });
     else if (p.venue === "curve") { const q = other(p);
       calls.push(q === NATIVE_ETH || !q ? { target: MULTICALL3, abi: MC3, fn: "getEthBalance", args: [p.pool] } : { target: q, abi: ERC20, fn: "balanceOf", args: [p.pool] }); }
+    else if (p.venue === "omm") calls.push({ target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
     else if (p.venue === "v3") calls.push({ target: p.pool, abi: V3, fn: "slot0" }, { target: p.pool, abi: V3, fn: "liquidity" },
       { target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
     else calls.push({ target: V4_STATE_VIEW, abi: SV, fn: "getSlot0", args: [p.pool] }, { target: V4_STATE_VIEW, abi: SV, fn: "getLiquidity", args: [p.pool] });
@@ -271,6 +280,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       const w = (k: number) => at(tk, k);
       const b = B.get(sd.quote), qUsd = sd.quote === USDG ? 1 : b ? b.usd : eu, pn = AGO.get(tk)?.pn;
       const st = p.venue === "v2" ? { r0: w(0)?.[0], r1: w(0)?.[1] } : p.venue === "curve" ? { q: w(0) as bigint | undefined, last: pn && qUsd ? pn / qUsd : null }
+        : p.venue === "omm" ? { b0: w(0) as bigint | undefined, b1: w(1) as bigint | undefined, last: pn && qUsd ? pn / qUsd : null }
         : { sqrt: w(0)?.[0], L: w(1), b0: w(2), b1: w(3), band: bands.get(tk) };
       const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote] ?? b!.dec, qUsd, st);
       main = {

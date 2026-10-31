@@ -62,6 +62,7 @@ export const UERC20_FACTORY = "0x000000e200088d55c39a11f609e5f667729ad49b"; // v
 // v4 hooks that mark a graduation pool as belonging to a launchpad (official
 // launchpad docs, 2026-08-09). A v4 Initialize whose hooks field matches one
 // of these is that platform's migration landing.
+export const METRIC_OMM_FACTORY = "0x2a53833cc95548cf52c7b159110e22d3a9018f32"; // verified "MetricOmmPoolFactory" (Sourcify); isPool(address)
 export const PONS_V2_MEME_HOOK = "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044";
 export const BAGS_V4_HOOK = "0x2380abf72c17aabab76480244759ac7e2932eecc";
 

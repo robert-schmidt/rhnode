@@ -26,9 +26,15 @@ export const SWAP_PANCAKE_V3 = toEventSelector("Swap(address,address,int256,int2
 export const PONS_CURVE_BUY = "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455";
 export const PONS_CURVE_SELL = "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df";
 
+// Metric OMM (an oracle-priced bin market maker; ~35K swaps a day in 78 pools, 2026-10-31): Swap(sender, recipient,
+// details, amountDeltas, platformFees), amountDeltas packing amount0 (high 128 bits) and amount1 (low), both signed and
+// pool-side like v3's (MetricOmmPool.sol on Sourcify; checked against the Transfer legs of 0x88492ce2…, 2026-10-31).
+// No price word: its price is the execution price, as v2's.
+export const SWAP_METRIC = toEventSelector("Swap(address,address,uint256,uint256,uint256)");
+
 export type SwapLog = {
   /** curve: amounts are curve-side in − out like v2, amount0 the token and amount1 the pair token (its pools row). */
-  venue: "v2" | "v3" | "v4" | "curve";
+  venue: "v2" | "v3" | "v4" | "curve" | "omm";
   /** v2/v3: the pool contract; v4: the poolId (the PoolManager emits for every pool). */
   pool: string;
   sender: string;
@@ -77,6 +83,14 @@ export function decodeSwap(log: { address: string; topics: string[]; data: strin
         venue: "v2", pool: log.address.toLowerCase(), sender: addr(log.topics[1]), recipient: addr(log.topics[2]),
         amount0: uint(word(hex, 0)) - uint(word(hex, 2)), amount1: uint(word(hex, 1)) - uint(word(hex, 3)),
         sqrtPriceX96: null, liquidity: null, tick: null, fee: null,
+      };
+    }
+    if (t0 === SWAP_METRIC) {
+      if (hex.length < 64 * 3 || log.topics.length < 3) return null;
+      const d = uint(word(hex, 1)), i128 = (v: bigint) => (v >= 1n << 127n ? v - (1n << 128n) : v), M = (1n << 128n) - 1n;
+      return {
+        venue: "omm", pool: log.address.toLowerCase(), sender: addr(log.topics[1]), recipient: addr(log.topics[2]),
+        amount0: i128(d >> 128n), amount1: i128(d & M), sqrtPriceX96: null, liquidity: null, tick: null, fee: null,
       };
     }
     if (t0 === PONS_CURVE_BUY || t0 === PONS_CURVE_SELL) {
