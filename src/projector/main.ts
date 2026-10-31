@@ -62,9 +62,11 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
   for (let i = 0; i < dirty.length; i += CHUNK) {
     const chunk = dirty.slice(i, i + CHUNK);
     // ponytail: groups every holder of WETH/USDG each tick; a per-token holder count kept by an MV if this gets slow.
+    // top10 sums in UInt256: a spam token's ten balances can pass 2^255, which wrapped negative in Int256 and stalled
+    // the history pass at block 94.84M (2026-10-31).
     const stats = await rows<Stats>(
       `SELECT token, countIf(b > 0 AND holder != {zero:String}) AS holder_count,
-         toString(arraySum(arraySlice(arrayReverseSort(groupArrayIf(b, b > 0 AND holder != {zero:String})), 1, 10))) AS top10,
+         toString(arraySum(x -> toUInt256(x), arraySlice(arrayReverseSort(groupArrayIf(b, b > 0 AND holder != {zero:String})), 1, 10))) AS top10,
          toString(-sumIf(b, holder = {zero:String})) AS minted
        FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances WHERE token IN {t:Array(String)} GROUP BY token, holder)
        GROUP BY token`,
