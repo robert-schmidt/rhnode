@@ -12,6 +12,8 @@
 // - h24/h6/h1 buys/sells/buyers/sellers by the trader (ev_trades), volume (net and raw) from priced swaps; price_change_pct
 //   the main pool's price now against its last 1-minute close 1/6/24 h ago (null with no trade before); top_wallet is the
 //   trader with the most 24 h trade USD and its share (wash across many txs by one wallet shows as a share near 1);
+// - block is what ingest holds; price_block the projector's cursor (prices, trades, candles, volumes are as of it: a
+//   stalled projector shows as price_block falling behind block);
 // - anything not known is null, never 0 (a token whose history isn't complete has null holder fields).
 import { parseAbi } from "viem";
 import { rows } from "./ch.ts";
@@ -133,12 +135,12 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     rows<{ token: string } & Record<string, number>>(`SELECT token, round(sum(nv), 2) AS v24, round(sum(rv), 2) AS raw24, round(sum(nv6), 2) AS v6,
       round(sum(rv6), 2) AS raw6, round(sum(nv1), 2) AS v1, round(sum(rv1), 2) AS raw1 FROM (${NET24}) GROUP BY token`, { t }),
     eth(),
-    rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'tip'"),
+    rows<{ b: string; pb: string }>("SELECT maxIf(block, name = 'tip') AS b, maxIf(block, name = 'projector') AS pb FROM ctl_cursors FINAL WHERE name IN ('tip', 'projector')"),
     rows<{ token: string; wallet: string; share: number }>(
       `SELECT token, argMax(wallet, w) AS wallet, max(w) / sum(w) AS share FROM (SELECT token, wallet, sum(usd * sign) AS w FROM ev_trades
        WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, wallet) GROUP BY token HAVING sum(w) > 0`, { t }),
   ]);
-  const ingested = Number(tip?.b ?? 0);
+  const ingested = Number(tip?.b ?? 0), projected = Number(tip?.pb ?? 0);
   const by = <T extends { token: string }>(xs: T[]) => new Map(xs.map((x) => [x.token, x]));
   const M = by(meta), L = by(launches), P = by(cands), T = by(trades), V = by(vols), W = by(tops);
   const curve = (tk: string) => { try { const c = JSON.parse(L.get(tk)?.detail ?? "{}").curve; return typeof c === "string" && ADDR.test(c.toLowerCase()) ? c.toLowerCase() : null; } catch { return null; } };
@@ -264,7 +266,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
         const was = AGO.get(tk)?.[`p${h}`], now = (main?.price_usd as number | null) ?? null;
         return [`h${h}`, was && now != null ? Math.round((now / was - 1) * 1e6) / 1e4 : null];
       })),
-      block: ingested,
+      block: ingested, price_block: projected,
     });
   }
   return out;
