@@ -3,7 +3,7 @@
 // - main pool: against a quote asset, verified first, then most net USD volume in 24 h, then most ever (1-minute candles);
 // - net volume: a tx's swaps in one pool count as what is left after buys and sells cancel (a same-tx round trip, wash,
 //   counts ~0); the *_raw_usd fields keep the gross, so wash shows as the gap;
-// - liquidity_usd from the pool's state at the tip: v2 reserves; v3 and v4 active liquidity (the tokens the positions
+// - liquidity_usd from the pool's state at the tip: a bonding curve's real quote balance (price: its last trade); v2 reserves; v3 and v4 active liquidity (the tokens the positions
 //   hold within ×/÷10,000 of the price, by a walk over the initialized ticks: a full-range pool gives its reserves, a
 //   one-tick position its real size, not its virtual reserves); liquidity_quote_usd the quote side alone (what a sell
 //   meets: a one-sided pool has a large liquidity_usd and almost none of it); v3 also liquidity_balances_usd (all it holds);
@@ -16,7 +16,7 @@
 import { parseAbi } from "viem";
 import { rows } from "./ch.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
-import { NATIVE_ETH, USDG, V4_STATE_VIEW, WETH } from "./chain/constants.ts";
+import { MULTICALL3, NATIVE_ETH, USDG, V4_STATE_VIEW, WETH } from "./chain/constants.ts";
 import { QUOTE_DECIMALS, sides } from "./projector/prices.ts";
 import { multicall, type Call } from "./projector/pools.ts";
 import type { Client } from "./chain/upstream.ts";
@@ -27,6 +27,7 @@ export type Card = Record<string, unknown>;
 export const ADDR = /^0x[0-9a-f]{40}$/;
 const DEAD = "0x000000000000000000000000000000000000dead";
 const ERC20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+const MC3 = parseAbi(["function getEthBalance(address) view returns (uint256)"]);
 const V2 = parseAbi(["function getReserves() view returns (uint112, uint112, uint32)"]);
 // only the first two words: v3 forks disagree on the rest of slot0
 const V3 = parseAbi(["function slot0() view returns (uint160, int24)", "function liquidity() view returns (uint128)",
@@ -57,12 +58,19 @@ const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) 
 const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
 type Pool = { token: string; pool: string; venue: string; quote: string; v24: number; raw24: number; v: number; verified: number; token0: string; token1: string; created_block: string; spacing: number };
-type Mid = { price: number | null; liquidityUsd: number | null; quoteUsd: number | null; kind: "reserves" | "active"; balancesUsd: number | null };
+type Mid = { price: number | null; liquidityUsd: number | null; quoteUsd: number | null; kind: "reserves" | "active" | "curve"; balancesUsd: number | null };
 
 /** PURE. Price (quote per token, human units) and liquidity from a pool's state at the tip. */
 export function poolState(venue: string, tokenIs0: boolean, dt: number | null, dq: number, quoteUsd: number | null,
-  s: { r0?: bigint; r1?: bigint; sqrt?: bigint; L?: bigint; b0?: bigint; b1?: bigint; band?: [number, number] }): Mid | null {
+  s: { r0?: bigint; r1?: bigint; sqrt?: bigint; L?: bigint; b0?: bigint; b1?: bigint; band?: [number, number]; q?: bigint; last?: number | null }): Mid | null {
   const usd = (quoteRaw: number) => (quoteUsd == null ? null : (2 * quoteRaw / 10 ** dq) * quoteUsd);
+  // A bonding curve's price is its last trade (its virtual reserves aren't real money); its liquidity is the quote it
+  // really holds, which is all a seller can be paid from.
+  if (venue === "curve") {
+    if (s.q == null) return null;
+    const q = quoteUsd == null ? null : (Number(s.q) / 10 ** dq) * quoteUsd;
+    return { price: s.last ?? null, liquidityUsd: q, quoteUsd: q, kind: "curve", balancesUsd: null };
+  }
   if (venue === "v2") {
     if (!s.r0 || !s.r1) return null;
     const [rt, rq] = tokenIs0 ? [s.r0, s.r1] : [s.r1, s.r0];
@@ -159,12 +167,14 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   for (const p of P.values()) {
     slots.set(p.token, calls.length);
     if (p.venue === "v2") calls.push({ target: p.pool, abi: V2, fn: "getReserves" });
+    else if (p.venue === "curve") { const q = sides(p.token0, p.token1)?.quote;
+      calls.push(q === NATIVE_ETH || !q ? { target: MULTICALL3, abi: MC3, fn: "getEthBalance", args: [p.pool] } : { target: q, abi: ERC20, fn: "balanceOf", args: [p.pool] }); }
     else if (p.venue === "v3") calls.push({ target: p.pool, abi: V3, fn: "slot0" }, { target: p.pool, abi: V3, fn: "liquidity" },
       { target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
     else calls.push({ target: V4_STATE_VIEW, abi: SV, fn: "getSlot0", args: [p.pool] }, { target: V4_STATE_VIEW, abi: SV, fn: "getLiquidity", args: [p.pool] });
   }
-  const [res, ago] = await Promise.all([mc(up, calls), P.size ? rows<{ token: string; pool: string; p1: number; p6: number; p24: number }>(
-    `SELECT token, pool, argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 HOUR) AS p1, argMaxMergeIf(close_usd, minute < now() - INTERVAL 6 HOUR) AS p6,
+  const [res, ago] = await Promise.all([mc(up, calls), P.size ? rows<{ token: string; pool: string; pn: number; p1: number; p6: number; p24: number }>(
+    `SELECT token, pool, argMaxMerge(close_usd) AS pn, argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 HOUR) AS p1, argMaxMergeIf(close_usd, minute < now() - INTERVAL 6 HOUR) AS p6,
        argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 DAY) AS p24 FROM agg_candles_1m
      WHERE token IN {t:Array(String)} AND pool IN {p:Array(String)} AND minute >= now() - INTERVAL 14 DAY GROUP BY token, pool`,
     { t: [...P.keys()], p: [...P.values()].map((p) => p.pool) }) : []]);
@@ -223,8 +233,9 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     if (p && sd && sd.token === tk) {
       // multicall answers: a tuple (getReserves, slot0, getSlot0) or a bigint (liquidity, balanceOf), null on failure
       const w = (k: number) => at(tk, k);
-      const st = p.venue === "v2" ? { r0: w(0)?.[0], r1: w(0)?.[1] } : { sqrt: w(0)?.[0], L: w(1), b0: w(2), b1: w(3), band: bands.get(tk) };
-      const qUsd = sd.quote === USDG ? 1 : eu;
+      const qUsd = sd.quote === USDG ? 1 : eu, pn = AGO.get(tk)?.pn;
+      const st = p.venue === "v2" ? { r0: w(0)?.[0], r1: w(0)?.[1] } : p.venue === "curve" ? { q: w(0) as bigint | undefined, last: pn && qUsd ? pn / qUsd : null }
+        : { sqrt: w(0)?.[0], L: w(1), b0: w(2), b1: w(3), band: bands.get(tk) };
       const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote], qUsd, st);
       main = {
         pool: p.pool, venue: p.venue, quote: sd.quote, verified: p.verified === 1, created_block: Number(p.created_block) || null,

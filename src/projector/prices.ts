@@ -1,5 +1,5 @@
 // Swap → price (migrations/004_prices.sql). v3/v4 price is the pool's price AFTER the swap (sqrtPriceX96);
-// v2 has no price word, so it is the swap's execution price (fee included).
+// v2 and curves have no price word, so it is the swap's execution price (v2: fee included; a curve: fees excluded).
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
@@ -19,7 +19,7 @@ export function sides(t0: string, t1: string): { token: string; quote: string; t
   return null;
 }
 
-export type Swap = { venue: "v2" | "v3" | "v4"; a0: string; a1: string; sqrt: string; token0: string; token1: string };
+export type Swap = { venue: "v2" | "v3" | "v4" | "curve"; a0: string; a1: string; sqrt: string; token0: string; token1: string };
 
 /** PURE. Trader-side deltas (+ = received), price in quote per token (human units), quote amount. null when
  *  the pool isn't against a quote asset, the token's decimals are unknown, or the swap moved no token. */

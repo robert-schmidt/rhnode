@@ -17,8 +17,15 @@ export const SWAP_V2 = toEventSelector("Swap(address,uint256,uint256,uint256,uin
 export const SWAP_V3 = toEventSelector("Swap(address,address,int256,int256,uint160,uint128,int24)");
 export const SWAP_V4 = toEventSelector("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
 
+// A Pons v2 bonding curve (one contract per token; topics: sender, recipient). Buy data: quote in (net of fees), tokens
+// out, then two fee words; Sell: tokens in, quote out (net), two fee words. Checked against the Transfer legs of
+// 0x08f1387c… (curve → buyer = tokens out) and 0xae3a30b4… (seller → curve = tokens in), 2026-10-31.
+export const PONS_CURVE_BUY = "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455";
+export const PONS_CURVE_SELL = "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df";
+
 export type SwapLog = {
-  venue: "v2" | "v3" | "v4";
+  /** curve: amounts are curve-side in − out like v2, amount0 the token and amount1 the pair token (its pools row). */
+  venue: "v2" | "v3" | "v4" | "curve";
   /** v2/v3: the pool contract; v4: the poolId (the PoolManager emits for every pool). */
   pool: string;
   sender: string;
@@ -40,7 +47,7 @@ const uint = (w: string) => BigInt("0x" + w);
 const int = (w: string) => { const v = uint(w); return v >= 1n << 255n ? v - (1n << 256n) : v; };
 const addr = (topic: string | undefined) => (topic ? "0x" + topic.slice(-40).toLowerCase() : "");
 
-/** PURE. A Swap log in full, or null when it is not one of the three events or is malformed. */
+/** PURE. A Swap log (or a curve trade) in full, or null when it is none of them or is malformed. */
 export function decodeSwap(log: { address: string; topics: string[]; data: string }): SwapLog | null {
   const t0 = (log.topics[0] ?? "").toLowerCase();
   const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
@@ -67,6 +74,14 @@ export function decodeSwap(log: { address: string; topics: string[]; data: strin
         venue: "v2", pool: log.address.toLowerCase(), sender: addr(log.topics[1]), recipient: addr(log.topics[2]),
         amount0: uint(word(hex, 0)) - uint(word(hex, 2)), amount1: uint(word(hex, 1)) - uint(word(hex, 3)),
         sqrtPriceX96: null, liquidity: null, tick: null, fee: null,
+      };
+    }
+    if (t0 === PONS_CURVE_BUY || t0 === PONS_CURVE_SELL) {
+      if (hex.length < 64 * 2 || log.topics.length < 3) return null;
+      const a = uint(word(hex, 0)), b = uint(word(hex, 1)), buy = t0 === PONS_CURVE_BUY;
+      return {
+        venue: "curve", pool: log.address.toLowerCase(), sender: addr(log.topics[1]), recipient: addr(log.topics[2]),
+        amount0: buy ? -b : a, amount1: buy ? a : -b, sqrtPriceX96: null, liquidity: null, tick: null, fee: null,
       };
     }
     return null;

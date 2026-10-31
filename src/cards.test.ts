@@ -38,3 +38,9 @@ test("band: a full-range position gives its reserves, a one-tick position its re
   const [u0, u1] = band(X96, 0, L, new Map([[-3, L], [3, -L], [600, L], [660, -L]]), -92103, 92103);
   near(u0, n0 + 1e20 * (1.0001 ** -300 - 1.0001 ** -330)); near(u1, n1);
 });
+
+test("poolState curve: price is the last trade, liquidity the quote the curve really holds", () => {
+  const m = poolState("curve", true, 18, 18, 3000, { q: 2n * 10n ** 18n, last: 1e-6 })!;
+  assert.deepEqual([m.price, m.liquidityUsd, m.quoteUsd, m.kind], [1e-6, 6000, 6000, "curve"]);
+  assert.equal(poolState("curve", true, 18, 18, 3000, {}), null, "no balance read");
+});

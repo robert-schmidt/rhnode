@@ -42,3 +42,10 @@ test("v2: execution price from the amounts; unknown decimals or no token moved â
   assert.equal(priceSwap({ venue: "v2", a0: "1", a1: "-1", sqrt: "0", token0: TOKEN, token1: WETH }, -1, 3000), null);
   assert.equal(priceSwap({ venue: "v3", a0: "0", a1: "5", sqrt: Q96.toString(), token0: TOKEN, token1: WETH }, 18, 3000), null);
 });
+
+test("curve: execution price like v2 (0.05 ETH for 2.8059e7 tokens), a buy is +tokens to the trader", () => {
+  const p = priceSwap({ venue: "curve", a0: (-28059n * 10n ** 21n).toString(), a1: "50000000000000000", sqrt: "0", token0: TOKEN, token1: NATIVE_ETH }, 18, 3000)!;
+  assert.equal(p.tokenDelta, 28059n * 10n ** 21n);
+  close(p.price, 0.05 / 28_059_000);
+  close(p.usd, 150);
+});

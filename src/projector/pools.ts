@@ -96,7 +96,7 @@ async function resolveV4(lookup: Client, p: { pool: string; manager: string }): 
 export async function resolvePools(up: Client, lookup: Client, from: number, to: number): Promise<{ v23: number; v4: number; failed: number }> {
   const unknown = await rows<{ pool: string; venue: string; manager: string }>(
     `SELECT pool, any(venue) AS venue, any(emitter) AS manager FROM ev_swaps
-     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}
+     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND venue != 'curve' -- a curve's row comes from its launch (migration 021)
        AND pool NOT IN (SELECT pool FROM pools FINAL WHERE verified = 1 OR version > {retry:UInt64})
      GROUP BY pool`,
     { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000 },
