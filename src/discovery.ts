@@ -2,10 +2,11 @@
 // - creations: code_hash (keccak of the code now; '' once it is gone) and implementation, the EIP-1967 implementation
 //   slot's address, else the EIP-1967 beacon's implementation();
 // - token_origin: the first mint's tx_from and tx_to (from the node's permanent tx and receipt), and its minter, the
-//   contract that made the token: its creator when tip traces saw the creation (minter_source 'trace'); else the first
-//   contract in the mint tx's receipt, other than the token and DEX infrastructure, whose log names the token (a
-//   launchpad's launch event does; a router that only forwards does not: 'event'); a token deployed by the tx itself has
-//   none ('deploy'). tx_to stays what the signer called, so a router in front of a launchpad shows as such.
+//   contract that made the token: the first contract in the mint tx's receipt, other than the token and DEX
+//   infrastructure, whose log names the token (a
+//   launchpad's launch event does; a router that only forwards does not: 'event'), else its creator when tip traces saw
+//   the creation ('trace'); a token deployed by the tx itself has none ('deploy'). tx_to stays what the signer called, so
+//   a router in front of a launchpad shows as such.
 // - token_markets, per token a launchpad made: its curve, the biggest holder once the mint tx is done if it holds at
 //   least half the mint, is a contract and not one of the token's pools, and is on one side of ≥40% of the early tape's
 //   txs (early.ts deduceMarkets); its graduation, the tx after which the curve holds under 1% of its peak and in which
@@ -133,10 +134,12 @@ async function origins(up: Up): Promise<number> {
     const [tx, rc] = await Promise.all([up.call<{ from: string; to: string | null } | null>("eth_getTransactionByHash", [d.tx_hash]),
       up.call<{ logs: Log[] } | null>("eth_getTransactionReceipt", [d.tx_hash])]);
     if (!tx || !rc) return; // not on our node yet: next round
-    const by = traced.get(d.token), ev = by ? null : minterOf(d.token, rc.logs, skip);
+    // the launch event's emitter first: a launchpad's tokens may be created by a helper it calls (Pons v2's 0x3711…)
+    const ev = tx.to == null ? null : minterOf(d.token, rc.logs, skip), by = traced.get(d.token);
     const { v, amt, ...row } = d;
     out.push({ ...row, amount: amt, tx_from: tx.from.toLowerCase(), tx_to: (tx.to ?? "").toLowerCase(), checked: 1, version: String(BigInt(v) + 1n),
-      ...(by ? { minter: by, minter_source: "trace" } : tx.to == null ? { minter: "", minter_source: "deploy" } : { minter: ev ?? "", minter_source: ev ? "event" : "" }) });
+      ...(tx.to == null ? { minter: "", minter_source: "deploy" } : ev ? { minter: ev, minter_source: "event" } : by ? { minter: by, minter_source: "trace" }
+        : { minter: "", minter_source: "" }) });
   });
   await insert("token_origin", out, `origins:${due[0].token}:${due.at(-1)!.token}:${out.length}:${due[0].v}`);
   return out.length;
@@ -158,16 +161,19 @@ async function markets(up: Up): Promise<number> {
      ORDER BY o.block DESC LIMIT 100`, { now: Date.now(), week: WEEK, tip: Number(tip.b) });
   if (!due.length) return 0;
   const t = due.map((d) => d.token);
-  const [tape, pr] = await Promise.all([
+  const [tape, pr, lps] = await Promise.all([
     rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND sign = 1 ORDER BY token, block, log_index LIMIT 500 BY token`, { t }),
     rows<{ pool: string; vn: string; cb: string; hooks: string; token0: string; token1: string }>(
       `SELECT pool, toString(venue) AS vn, created_block AS cb, hooks, token0, token1 FROM pools FINAL
        WHERE ok = 1 AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})`, { t }),
+    rows<{ pool: string }>("SELECT pool FROM pools WHERE pool IN {t:Array(String)}", { t }),
   ]);
-  const T = byToken(tape), P = new Map<string, PoolRow[]>();
-  for (const p of pr) for (const k of [p.token0, p.token1]) (P.get(k) ?? P.set(k, []).get(k)!).push({ pool: p.pool, venue: p.vn, created_block: Number(p.cb), hooks: p.hooks });
+  const T = byToken(tape), P = new Map<string, PoolRow[]>(), lp = new Set(lps.map((r) => r.pool)), skip = await infraSet();
+  // a curve is a pools row too (migration 022), but not a market a curve can graduate into
+  for (const p of pr) if (p.vn !== "curve") for (const k of [p.token0, p.token1]) (P.get(k) ?? P.set(k, []).get(k)!).push({ pool: p.pool, venue: p.vn, created_block: Number(p.cb), hooks: p.hooks });
   const curve = new Map<string, string>();
-  await pool(due, async (d) => {
+  // an LP token (the token is a pool) or a token a DEX made is no launch: final with no curve
+  await pool(due.filter((d) => !lp.has(d.token) && !skip.has(d.minter)), async (d) => {
     const c = curveOf(d.tx_hash, T.get(d.token) ?? [], new Set((P.get(d.token) ?? []).map((p) => p.pool)));
     if (!c) return;
     const code = await up.call<string>("eth_getCode", [c, "latest"]);
@@ -182,7 +188,7 @@ async function markets(up: Up): Promise<number> {
   const out = due.map((d) => {
     const c = curve.get(d.token) ?? "", g = c ? graduationOf(c, F.get(d.token) ?? [], new Map([[empty.get(d.token)?.tx_hash ?? "", G.filter((r) => r.token === d.token).map(tr)]]), P.get(d.token) ?? []) : null;
     return { token: d.token, minter: d.minter, curve: c, grad_block: g?.block ?? 0, grad_tx: g?.tx ?? "", pool: g?.pool ?? "", venue: g?.venue ?? "",
-      final: g || (!c && Number(d.block) + DAY < Number(tip.b)) ? 1 : 0, version: Date.now() };
+      final: g || (!c && (lp.has(d.token) || skip.has(d.minter) || Number(d.block) + DAY < Number(tip.b))) ? 1 : 0, version: Date.now() };
   });
   await insert("token_markets", out, `markets:${t[0]}:${t.at(-1)}:${Date.now()}`);
   return out.length;
