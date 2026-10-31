@@ -13,11 +13,14 @@
 //   the token reaches one of its pools (v2/v3/OMM: the pool; v4: the PoolManager, the pool being the token's v4 pool
 //   created in that block, a launchpad hook's first). A token without a curve a day after its mint, or graduated, is final;
 //   others are looked at again hourly (daily after a week).
+// - curve_payouts (migration 025): native ETH out of a curve from tip traces, LAG blocks behind them (a new token's
+//   curve is found within the hour of its first trades, so its payouts are scanned after it is known); ERC-20 quotes
+//   out of a curve from kept_transfers, recomputed hourly (it reaches back with the history pass).
 // Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass.
 import { keccak256 } from "viem";
-import { insert, rows } from "./ch.ts";
+import { ch, insert, rows } from "./ch.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
-import { BURN_SINKS, METRIC_OMM_FACTORY, UNIV2_FACTORY, UNIV3_FACTORY, UNIV4_POOL_MANAGER } from "./chain/constants.ts";
+import { BURN_SINKS, METRIC_OMM_FACTORY, NATIVE_ETH, UNIV2_FACTORY, UNIV3_FACTORY, UNIV4_POOL_MANAGER, USDG, WETH } from "./chain/constants.ts";
 import { HOOK_SOURCES } from "./chain/registry.ts";
 import { deduceMarkets, type Tf } from "./early.ts";
 import type { Up } from "./cards.ts";
@@ -194,10 +197,51 @@ async function markets(up: Up): Promise<number> {
   return out.length;
 }
 
+export const TRACE_START = 102_274_040; // raw_traces' first block, 2026-10-31 04:12 UTC
+const LAG = 70_000, NATIVE_STEP = 50_000; // blocks: ~2 h, ~1.4 h
+const CURVES = "(SELECT curve FROM token_markets FINAL WHERE curve != '')";
+const OWN = "(SELECT token, curve FROM token_markets FINAL WHERE curve != '')";
+// in this tx a token of the curve went into it (a sell)
+const SELLS = (since: string) => `(SELECT tx_hash, \`to\` FROM kept_transfers WHERE token IN (SELECT token FROM token_markets FINAL WHERE curve != '')
+  AND (token, \`to\`) IN ${OWN} ${since})`;
+const EU = (since: string) => `(SELECT toStartOfHour(time) AS h, avg(eth_usd) AS eu FROM ev_prices WHERE eth_usd > 0 ${since} GROUP BY h)`;
+const ANCHORS = `('${WETH}', '${NATIVE_ETH}', '${USDG}')`;
+export const NATIVE_PAYOUTS = `INSERT INTO curve_payouts
+  SELECT t.from AS c, t.block AS b, t.tx_index AS ti, t.idx AS ix, t.tx_hash AS th, t.time AS tm, 'eth' AS a, t.to AS r, t.value AS v,
+    if(e.eu > 0, toFloat64(t.value) / 1e18 * e.eu, NULL) AS u, (t.tx_hash, t.from) IN ${SELLS("AND time >= {t0:DateTime}")} AS sl, 'trace' AS src
+  FROM raw_traces AS t LEFT JOIN ${EU("AND time >= {t0:DateTime}")} AS e ON e.h = toStartOfHour(t.time)
+  WHERE t.block > {lo:UInt64} AND t.block <= {hi:UInt64} AND t.value > 0 AND t.error = '' AND t.from IN ${CURVES}`;
+export const ERC20_PAYOUTS = `INSERT INTO curve_payouts
+  SELECT k.from AS c, k.block AS b, k.tx_index AS ti, k.log_index AS ix, k.tx_hash AS th, k.time AS tm, toString(k.token) AS a, toString(k.to) AS r, k.amount AS v,
+    multiIf(k.token = '${USDG}', toFloat64(k.amount) / 1e6, k.token = '${WETH}' AND e.eu > 0, toFloat64(k.amount) / 1e18 * e.eu,
+      p.pu > 0, toFloat64(k.amount) / pow(10, d.dc) * p.pu, NULL) AS u, (k.tx_hash, k.from) IN ${SELLS("")} AS sl, 'transfer' AS src
+  FROM (SELECT * FROM kept_transfers WHERE sign = 1 AND \`from\` IN ${CURVES} AND (token IN ('${WETH}', '${USDG}') OR token IN
+    (SELECT toFixedString(JSONExtractString(detail, 'pairToken'), 42) FROM kept_launches WHERE kind = 'launch' AND JSONExtractString(detail, 'pairToken') NOT IN ('', '${NATIVE_ETH}') GROUP BY 1))) AS k
+  LEFT JOIN ${EU("")} AS e ON e.h = toStartOfHour(k.time)
+  LEFT JOIN (SELECT token AS pt, toStartOfHour(time) AS h, avg(price_usd) AS pu FROM ev_prices WHERE quote IN ${ANCHORS} AND verified = 1 AND usd >= 100
+    GROUP BY pt, h) AS p ON p.pt = k.token AND p.h = toStartOfHour(k.time)
+  LEFT JOIN (SELECT token AS dt, decimals AS dc FROM serve_tokens FINAL) AS d ON d.dt = k.token
+  WHERE (k.token, k.from) NOT IN ${OWN}`;
+
+let erc20At = 0;
+async function payouts(): Promise<number> {
+  const [c] = await rows<{ p: string; t: string }>("SELECT maxIf(block, name = 'payouts') AS p, maxIf(block, name = 'trace') AS t FROM ctl_cursors FINAL WHERE name IN ('payouts', 'trace')");
+  const lo = Math.max(Number(c.p), TRACE_START - 1), hi = Math.min(Number(c.t) - LAG, lo + NATIVE_STEP);
+  let n = 0;
+  if (hi > lo) {
+    const [b] = await rows<{ t: string }>("SELECT toString(time - INTERVAL 1 HOUR) AS t FROM raw_blocks WHERE number = {b:UInt64}", { b: lo + 1 });
+    await ch.command({ query: NATIVE_PAYOUTS, query_params: { lo, hi, t0: b?.t ?? "2026-10-31 00:00:00" } });
+    await insert("ctl_cursors", [{ name: "payouts", block: hi, hash: "", version: Date.now() }], `payouts:${hi}`);
+    n = hi - lo;
+  }
+  if (Date.now() - erc20At > 3_600_000) { await ch.command({ query: ERC20_PAYOUTS }); erc20At = Date.now(); n++; }
+  return n;
+}
+
 export async function discoveryWorker(up: Up): Promise<never> {
   for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
-      const n = await creations(up) + await origins(up) + await markets(up);
+      const n = await creations(up) + await origins(up) + await markets(up) + await payouts();
       wait = n ? 1_000 : 60_000;
     } catch (e) { console.error("discovery:", (e as Error).message); wait = 60_000; } // ingest may not have migrated yet
   }
