@@ -59,7 +59,7 @@ export async function label(up: Up, addrs: string[]): Promise<number> {
 
 /** Hubs and requested wallets not checked in 30 days, every hour. */
 export async function labelWorker(up: Up): Promise<never> {
-  for (;;) {
+  for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
       const due = (await rows<{ a: string }>(`SELECT a FROM (
           SELECT src AS a FROM agg_native_src GROUP BY src HAVING uniqMerge(peers) >= {p:UInt32}
@@ -69,8 +69,8 @@ export async function labelWorker(up: Up): Promise<never> {
       let named = 0;
       for (let i = 0; i < due.length; i += 200) named += await label(up, due.slice(i, i + 200));
       if (due.length) console.log(`labels: checked ${due.length}, named ${named}`);
-    } catch (e) { console.error("labels:", (e as Error).message); }
-    await new Promise((r) => setTimeout(r, 3_600_000));
+      wait = 3_600_000;
+    } catch (e) { console.error("labels:", (e as Error).message); wait = 60_000; } // ingest may not have migrated yet
   }
 }
 
