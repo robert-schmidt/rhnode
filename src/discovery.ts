@@ -163,6 +163,9 @@ type Row = { token: string; block: string; log_index: number; tx_hash: string; f
 const tr = (r: Row): Tr => ({ block: Number(r.block), log_index: r.log_index, tx_hash: r.tx_hash, from: r.from, to: r.to, amount: BigInt(r.amt) });
 const byToken = (rs: Row[]) => { const m = new Map<string, Tr[]>(); for (const r of rs) (m.get(r.token) ?? m.set(r.token, []).get(r.token)!).push(tr(r)); return m; };
 const TF = "SELECT token, block, log_index, tx_hash, `from`, `to`, toString(amount) AS amt FROM kept_transfers FINAL";
+// FINAL per monthly partition (a row and its copies share a block, so a month) on 2 threads: a 100-token tape took 806 MB
+// and 1.6 s, this 160 MB and 3.2 s (measured 2026-10-31); at 3.4 GB one hit ClickHouse's cap beside the history pass.
+const LEAN = " SETTINGS do_not_merge_across_partitions_select_final = 1, max_threads = 2";
 
 async function markets(up: Up): Promise<number> {
   const [tip] = await rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'tip'");
@@ -175,7 +178,7 @@ async function markets(up: Up): Promise<number> {
   if (!due.length) return 0;
   const t = due.map((d) => d.token);
   const [tape, pr, lps] = await Promise.all([
-    rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND sign = 1 ORDER BY token, block, log_index LIMIT 500 BY token`, { t }),
+    rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND sign = 1 ORDER BY token, block, log_index LIMIT 500 BY token${LEAN}`, { t }),
     rows<{ pool: string; vn: string; cb: string; hooks: string; token0: string; token1: string }>(
       `SELECT pool, toString(venue) AS vn, created_block AS cb, hooks, token0, token1 FROM pools FINAL
        WHERE ok = 1 AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})`, { t }),
@@ -194,9 +197,9 @@ async function markets(up: Up): Promise<number> {
   });
   const ct = [...curve.keys()], cs = [...new Set(curve.values())];
   const F = ct.length ? byToken((await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND (\`from\` IN {c:Array(String)} OR \`to\` IN {c:Array(String)}) AND sign = 1
-    ORDER BY token, block, log_index LIMIT 100000 BY token`, { t: ct, c: cs })).filter((r) => r.from === curve.get(r.token) || r.to === curve.get(r.token))) : new Map();
+    ORDER BY token, block, log_index LIMIT 100000 BY token${LEAN}`, { t: ct, c: cs })).filter((r) => r.from === curve.get(r.token) || r.to === curve.get(r.token))) : new Map();
   const empty = new Map(ct.map((k) => [k, emptiedAt(curve.get(k)!, F.get(k) ?? [])] as const).filter(([, e]) => e));
-  const G = empty.size ? (await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND tx_hash IN {h:Array(String)} AND sign = 1 ORDER BY block, log_index`,
+  const G = empty.size ? (await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND tx_hash IN {h:Array(String)} AND sign = 1 ORDER BY block, log_index${LEAN}`,
     { t: [...empty.keys()], h: [...empty.values()].map((e) => e!.tx_hash) })) : [];
   const out = due.map((d) => {
     const c = curve.get(d.token) ?? "", g = c ? graduationOf(c, F.get(d.token) ?? [], new Map([[empty.get(d.token)?.tx_hash ?? "", G.filter((r) => r.token === d.token).map(tr)]]), P.get(d.token) ?? []) : null;
