@@ -6,6 +6,7 @@ import { ago, eth, html, link, short, sparkline, units, usd, utc, when, type Htm
 import { bare, lookup, methods } from "./names.ts";
 import { requested } from "../watch.ts";
 import { cards, NET24 } from "../cards.ts";
+import { earlyBuyers } from "../early.ts";
 import { PROTOCOL } from "../chain/protocol.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
@@ -375,10 +376,16 @@ const upOf = (rpc: Rpc) => ({ call: <T>(m: string, p: unknown[]) => call<T>(rpc,
 const money = (v: number | null | undefined) => (v == null ? "—" : usd(v));
 // wash: most of the gross is same-tx round trips; one-sided: almost none of the pool's tokens are what a seller receives
 const washy = (net: number, raw: number) => raw > 1_000 && raw > 2 * net;
+type Early = { launch_block: number; launch_source: string; deployer: string | null; closed: boolean; skipped: number;
+  buyers: { rank: number; block: number; tx_hash: string; wallet: string; signer: string | null; via: string; pct: number | null; usd_in: number | null;
+    sold: boolean; sold_out: boolean; first_out_block: number | null; first_sell_block: number | null;
+    groups: { same_tx: number | null; same_block: number | null; same_signer: number | null };
+    funding: { funder: string; funder_peers: number; funder_is_deployer: boolean; funder_shared_with_deployer: boolean } | null }[] };
+const EARLY_BLOCKS = 300; // ~31 s at 104 ms blocks
 const QUOTES: Record<string, string> = { [USDG]: "USDG", [WETH]: "WETH", [NATIVE_ETH]: "ETH" };
 
 async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
-  const [card, holders, pools, own] = await Promise.all([
+  const [card, holders, pools, own, early] = await Promise.all([
     cards(upOf(rpc), [t]).then((m) => (m.get(t) ?? null) as View | null),
     rows<{ holder: string; bal: string }>(
       `SELECT holder, toString(sum(balance)) AS bal FROM agg_balances WHERE token = {t:String} AND holder != {z:String} GROUP BY holder HAVING sum(balance) > 0
@@ -387,6 +394,7 @@ async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
       `SELECT n.pool AS pl, toString(p.venue) AS v, n.q AS q, n.nv AS vol, n.rv AS raw, p.hooks AS hk, p.verified AS vf
        FROM (${NET24}) AS n INNER JOIN (SELECT * FROM pools FINAL) AS p ON p.pool = n.pool ORDER BY vol DESC, raw DESC LIMIT 10`, { t: [t] }),
     rows<{ pool: string; hooks: string }>("SELECT pool, hooks FROM pools FINAL WHERE token0 = {t:String} OR token1 = {t:String}", { t }),
+    earlyBuyers(upOf(rpc), t, EARLY_BLOCKS, 20).then((r) => (r.status === 200 ? r.body as Early : null)).catch(() => null),
   ]);
   const mp = card?.main_pool ?? null, d = card?.h24;
   const chartPool = mp?.pool ?? pools.find((p) => p.vf === 1)?.pl;
@@ -425,9 +433,24 @@ ${pools.length ? html`<h3>Pools (24 h)</h3><div class="tw"><table><tr><th>Pool</
 ${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${quote(p.q)}</td><td class="num">${usd(p.vol)}</td><td class="num muted">${usd(p.raw)}</td>
 <td>${p.pl === mp?.pool ? html`<span class="tag">main</span> ` : ""}${p.vf ? "" : html`<span class="bad small">unverified</span> `}${washy(p.vol, p.raw) ? html`<span class="bad small">wash</span> ` : ""}${p.hk && !/^0x0*$/.test(p.hk) ? html`<span class="tag">hook</span>` : ""}</td></tr>`)}</table></div>
 <p class="muted small">Volume is net: a transaction's buys and sells in one pool cancel, so round trips (wash trading) count for nothing; Gross counts every swap. Sell-side liquidity is the ETH or USDG a seller can receive from the main pool within ×/÷10,000 of the price.</p>` : ""}
+${early?.buyers.length ? earlyTable(early) : ""}
 ${holders.length ? html`<h3>Top holders</h3><div class="tw"><table><tr><th>Holder</th><th></th><th>Balance</th><th>Share</th></tr>
 ${holders.map((h) => html`<tr><td>${link("address", h.holder)}</td><td>${what(h.holder)}</td><td>${units(h.bal, tok.decimals, 2)}</td><td>${supply > 0n ? `${(Number((BigInt(h.bal) * 10000n) / supply) / 100).toFixed(2)}%` : ""}</td></tr>`)}</table></div>
 <p class="muted small">The top 10 share leaves out pools, lockers, burn addresses and other protocol contracts.</p>` : ""}`;
+}
+
+function earlyTable(e: Early): Html {
+  const now = (b: Early["buyers"][number]) => b.sold_out ? html`<span class="bad small">sold out</span>` : b.sold ? html`<span class="small">sold some</span>` : html`<span class="ok small">holds</span>`;
+  const tags = (b: Early["buyers"][number]) => html`${b.groups.same_tx ? html`<span class="tag" title="same transaction as #${b.groups.same_tx}">tx #${b.groups.same_tx}</span> ` : ""}${b.groups.same_signer
+    ? html`<span class="tag" title="same signer as #${b.groups.same_signer}">signer #${b.groups.same_signer}</span> ` : ""}${b.groups.same_block && !b.groups.same_tx ? html`<span class="tag" title="same block as #${b.groups.same_block}">block #${b.groups.same_block}</span> ` : ""}${b.first_out_block && !b.first_sell_block
+    ? html`<span class="tag" title="sent tokens out without selling">moved out</span>` : ""}`;
+  const fund = (b: Early["buyers"][number]) => !b.funding ? html`<span class="muted">—</span>` : html`${link("address", b.funding.funder)}${b.funding.funder_is_deployer
+    ? html` <span class="bad small">deployer</span>` : b.funding.funder_shared_with_deployer ? html` <span class="bad small">deployer's funder</span>` : ""}${b.funding.funder_peers > 1 ? html` <span class="muted small">funded ${b.funding.funder_peers.toLocaleString("en-US")}</span>` : ""}`;
+  return html`<h3>Early buyers <span class="muted small">(first ${EARLY_BLOCKS} blocks after the ${e.launch_source === "pool" ? "first pool" : e.launch_source === "mint" ? "first mint" : `${e.launch_source} launch`} in block ${link("block", e.launch_block)}${e.closed ? "" : ", still open"})</span></h3>
+<div class="tw"><table><tr><th>#</th><th>Wallet</th><th>Via</th><th class="num">Paid</th><th class="num">Supply</th><th>Now</th><th>Funded by</th><th></th></tr>
+${e.buyers.map((b) => html`<tr><td>${link("tx", b.tx_hash, String(b.rank))}</td><td>${link("address", b.wallet)}${b.wallet === e.deployer ? html` <span class="bad small">deployer</span>` : ""}</td><td>${b.via}</td>
+<td class="num">${money(b.usd_in)}</td><td class="num">${b.pct == null ? "" : `${b.pct.toFixed(2)}%`}</td><td>${now(b)}</td><td>${fund(b)}</td><td>${tags(b)}</td></tr>`)}</table></div>
+<p class="muted small">Wallets that received the token and kept a net positive amount in the window, curve and pool buys alike; pools, curves, protocol contracts and ${e.skipped} other market addresses aren't buyers. Same-number tags mark wallets that bought in one transaction, with one signer, or in one block. "Moved out" sent tokens away without selling (a side wallet, often).</p>`;
 }
 
 // --- search ---
