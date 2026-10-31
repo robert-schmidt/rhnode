@@ -8,9 +8,8 @@
 # agg_* sums come back by re-running the history pass (~2-3 days). Dumped: what comes from tip traces (creations,
 # curve_payouts, kept_native's internal transfers), our own state (ctl_*), and small tables that are slow to recompute.
 # BACKUP_TABLES=a,b,c replaces the list; BACKUP_TABLES=all dumps every kept_/agg_/ctl_ table as before.
-# Restore a table (after npm run migrate):
-#   zstd -dc <dump>/<table>.native.zst | docker compose exec -T clickhouse sh -c \
-#     'clickhouse-client -u "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -q "INSERT INTO rhnode.<table> FORMAT Native"'
+# Each dump has MANIFEST (table, rows at dump time) and SHA256SUMS. Restore: ops/restore.sh (checks both first).
+# Rotation: dumps are named by UTC time, the newest BACKUP_KEEP stay, and the mirror follows (rsync --delete).
 # Tables are dumped one after another, not at one instant; ReplacingMergeTree rows may repeat until merged (FINAL reads).
 set -eu
 cd "$(dirname "$0")/.."
@@ -31,8 +30,10 @@ for t in $(q -q "SELECT name FROM system.tables WHERE database = 'rhnode' AND en
     AND ($W) AND name != 'kept_transfers_by_wallet' ORDER BY name"); do
   q -q "SHOW CREATE TABLE $t" --format TSVRaw > "$OUT.tmp/$t.sql"
   q -q "SELECT * FROM $t FORMAT Native" > "$OUT.tmp/$t.native" # to a file first: sh has no pipefail
+  printf "%s\t%s\n" "$t" "$(q -q "SELECT count() FROM $t")" >> "$OUT.tmp/MANIFEST" # ponytail: counted after the dump; a busy table may drift by a few rows
   zstd -q --rm -T2 -6 "$OUT.tmp/$t.native"
 done
+(cd "$OUT.tmp" && sha256sum -- *.zst *.sql MANIFEST > SHA256SUMS)
 mv "$OUT.tmp" "$OUT"
 ls -1d "$DIR"/20* | head -n -"$KEEP" | xargs -r rm -rf
 log "dumped $(ls "$OUT" | grep -c native) tables, $(du -sh "$OUT" | cut -f1); kept $(ls -1d "$DIR"/20* | wc -l) dumps, $(du -sh "$DIR" | cut -f1)"

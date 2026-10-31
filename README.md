@@ -15,15 +15,18 @@ No API keys, no paid providers. Runs on a 32 GB mini PC (measured: ~100 Mgas/s c
 |---|---|
 | M0 scaffold: compose (ClickHouse + Redis), config profiles, migrations | ✅ |
 | M1 tip ingest of every block → `raw_*` + decoded `ev_*` (transfers, swaps, pools, launches, Relay fills), keep bits, reorg rollback | ✅ |
-| M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices + 1m candles, wallet trades | in progress |
+| M2 projector: balances/holders (`agg_balances`, `serve_tokens`), pool identities, prices (two-hop through WETH/stables) + 1m candles, wallet trades | ✅ |
 | Token promotion: a token older than go-live gets its whole history once, on first request (`src/promoter`) | ✅ |
-| Tip traces: every call frame of every tx, taken at the tip on your own node (`TRACES=tip`), kept 14 days for the stream and tx trace lookups | built |
+| Tip traces: every call frame of every tx, taken at the tip on your own node (`TRACES=tip`), kept 14 days for the stream and tx trace lookups | ✅ |
 | History pass: every block from go-live back to genesis on your own node, read once and decoded by the ingest decoder (`HISTORY=1`); kept forever: ERC-20 transfers and balances, swaps, launches, pools, Relay fills, every wallet's txs and ETH transfers | running since 2026-10-31 |
-| Prices, 1m candles and wallet trades before go-live, derived from what the history pass keeps (no further node reads) | next |
+| Launchpad discovery from the chain (no list): contract creations, each token's first minter, curve and graduation pool, ETH and quote tokens paid out of curves | ✅ |
+| Prices, 1m candles and wallet trades before go-live, derived from what the history pass keeps (no further node reads) | after the history pass reaches genesis |
 | M3 API: `/rpc`, `/ws`, Blockscout-compatible `/api`, API keys (a separate service since 2026-10-30) | ✅ |
-| M4 `/v1/stream` with resume, watchlists | planned |
-| M5 `/v1` insights REST | planned |
-| M6 own Nitro node (`--profile node`), snapshot seeding, L1 proxy, self-heal + CI-gated deploys | syncing |
+| M4 `/v1/stream` with resume (`resume_from`, replayed from the node), watchlists of wallets and tokens | ✅ (in the API service) |
+| M5 `/v1` insights REST: token cards, holders, early buyers, pools and risk, launchpads, token origins, new contracts, wallet first txs, candles | ✅ (in the API service) |
+| M6 own Nitro node (`--profile node`), snapshot seeding, L1 proxy, self-heal + CI-gated deploys | ✅ synced, ~1 block behind the sequencer (measured 2026-10-31) |
+| Explorer (`src/explorer`): blocks, txs, addresses, tokens, live home feed | ✅ |
+| Nightly partial backups with rotation and a checked restore (`ops/backup.sh`, `ops/restore.sh`) | ✅ |
 
 Design and reasoning: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -132,6 +135,12 @@ Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_block
   sudo cp ops/rhnode-heal.service ops/rhnode-heal.timer /etc/systemd/system/
   sudo systemctl daemon-reload && sudo systemctl enable --now rhnode-heal.timer
   ```
+- **Backups:** `ops/rhnode-backup.timer` runs `ops/backup.sh` nightly. It dumps only what the node can't give back (tables
+  from tip traces, `ctl_*` state, small slow-to-recompute tables: ~400 MB, 40 s), keeps the newest `BACKUP_KEEP` (7),
+  and mirrors them with `rsync --delete` to `BACKUP_SSH` if set. Everything else is rebuilt from the node by the history pass.
+  Restore with `sudo sh ops/restore.sh /srv/rhnode-backups/<dump>`: it verifies the checksums, loads tables that are empty
+  or missing, and compares row counts (`--replace` overwrites, `--db name` restores into a scratch database). On a fresh
+  box, migrate first: `docker compose up -d clickhouse && docker compose run --rm ingest node src/migrate.ts`.
 - Nitro stops with a 5-minute grace period and resumes from its database. After an unclean stop it re-executes from its
   last persisted state.
 
@@ -153,10 +162,12 @@ node --env-file=.env src/tools/check-balances.ts   # compare indexed balances wi
 src/chain/      decoders (launchpads, v2/v3/v4 swaps, Relay fills), constants, the rotating upstream client
 src/ingest/     tip follower + backfill, keep rules, reorg rollback
 src/projector/  pools, balances/holders, prices + candles, trades
-src/promoter/   on-demand history of tokens older than go-live
+src/promoter/   the history pass, on-demand history of tokens older than go-live, watched wallets
+src/discovery.ts launchpads from the chain: creations, token origins, markets, curve payouts
+src/explorer/   the block explorer pages
 src/l1proxy.ts  Nitro's L1 reads, with failover and no keyed URL in Nitro's logs
 nitro/          the chain's official config files, snapshot.sh
-ops/            deploy.sh (CI-gated releases), heal.sh + systemd timer (self-healing)
+ops/            deploy.sh (CI-gated releases), heal.sh (self-healing), backup.sh + restore.sh, systemd units
 migrations/     ClickHouse schema (applied in order on start)
 ```
 
