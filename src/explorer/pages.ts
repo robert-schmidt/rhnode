@@ -167,14 +167,14 @@ export async function home(rpc: Rpc): Promise<Page> {
 <div class="stats" id="tiles">${liveTiles(head, net)}</div>
 <div class="cols"><section><h2>Latest blocks <span class="live" hidden><i></i><span>Live</span></span></h2><ol class="feed blocks" id="blocks">${blockRows.slice(0, 15)}</ol></section>
 <section><h2>Latest transactions</h2><ol class="feed txs" id="txs">${txRows}</ol></section></div>
-${net.table}
+<div id="net">${net.table}</div>
 <p class="muted small" id="hint">New blocks and transactions come in at the top; pointing at a list pauses it. Failed transactions are dimmed.</p>` };
 }
 
 /** /live: the same rows and tiles as a fragment, for live.js. */
 export async function live(rpc: Rpc): Promise<Page> {
   const { head, blockRows, txRows, net } = await latest(rpc);
-  return { status: 200, title: "", fragment: true, body: html`<div id="tiles">${liveTiles(head, net)}</div><ol id="blocks">${blockRows}</ol><ol id="txs">${txRows}</ol>` };
+  return { status: 200, title: "", fragment: true, body: html`<div id="tiles">${liveTiles(head, net)}</div><div id="net">${net.table}</div><ol id="blocks">${blockRows}</ol><ol id="txs">${txRows}</ol>` };
 }
 
 // --- block ---

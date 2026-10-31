@@ -5,7 +5,7 @@
 (() => {
   const POLL = 1500, KEEP = 15; // /live carries ~4 s of blocks, so a poll never skips one
   const lists = ["blocks", "txs"].map((id) => ({ el: document.getElementById(id), queue: [], held: false }));
-  const tiles = document.getElementById("tiles"), badge = document.querySelector(".live"), label = badge && badge.querySelector("span");
+  const tiles = document.getElementById("tiles"), net = document.getElementById("net"), badge = document.querySelector(".live"), label = badge && badge.querySelector("span");
   if (!lists.every((l) => l.el) || !tiles) return;
   document.documentElement.classList.add("js");
   if (badge) badge.hidden = false;
@@ -51,8 +51,11 @@
       const r = await fetch("/live", { cache: "no-store", credentials: "same-origin" });
       if (!r.ok || r.redirected) throw new Error(String(r.status));
       const doc = new DOMParser().parseFromString(await r.text(), "text/html");
-      const t = doc.getElementById("tiles");
-      if (t) tiles.replaceChildren(...[...t.children].map((c) => document.importNode(c, true)));
+      // the tiles and the Network table (recomputed every 15 s on the server)
+      for (const [mine, id] of [[tiles, "tiles"], [net, "net"]]) {
+        const got = doc.getElementById(id);
+        if (mine && got) mine.replaceChildren(...[...got.children].map((c) => document.importNode(c, true)));
+      }
       for (const l of lists) {
         const got = doc.getElementById(l.el.id);
         if (!got) throw new Error("no rows");
