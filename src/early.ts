@@ -8,7 +8,9 @@
 // - bought: what the wallet received in the window; net: received minus sent in it (a buyer that flipped in-window
 //   isn't counted at its peak); buyers are the net-positive recipients, in order of their first receipt;
 // - paid: the ETH the signer sent with each tx the wallet received in (split by tokens received when a tx served
-//   several buyers) plus the WETH/USDG the wallet sent in those txs; usd_in prices them at the window's ETH candle;
+//   several buyers) plus the WETH, USDG and launch pair token (a Pons curve can be paired with e.g. a stock token)
+//   the wallet sent in those txs; each priced at its last 1-minute close before launch, usd_in null if one isn't;
+// - wallet_first_block: the wallet's first tx, only when it is known to be its first (nonce 0);
 // - since: max_held and the first outflow (any, and to a market) from every later transfer; sold = balance below
 //   max held, sold_out = below 10% of it;
 // - funding: the wallet's first ETH funder (native_edges), the funder's hub stats, and its links to the deployer;
@@ -108,8 +110,9 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
   }
   if (!from) return { status: 404, body: { error: "no launch, pool or mint of this token is indexed" } };
   const to = from + blocks, head = Number(tip?.b ?? 0), supply = BigInt(meta.supply);
-  let curve = "";
-  try { curve = String(JSON.parse(launch?.detail ?? "{}").curve ?? "").toLowerCase(); } catch { /* no curve */ }
+  let curve = "", pair = "";
+  try { const d = JSON.parse(launch?.detail ?? "{}"); curve = String(d.curve ?? "").toLowerCase(); pair = String(d.pairToken ?? "").toLowerCase(); } catch { /* no detail */ }
+  const quoteTokens = [...new Set([WETH, USDG, ...(/^0x[0-9a-f]{40}$/.test(pair) && pair !== ZERO ? [pair] : [])])];
   const deployer = (launch?.deployer || created?.deployer || "").toLowerCase() || null;
 
   // the tape: the block window, and the first `minutes` after launch when asked for (one read covers both)
@@ -139,7 +142,7 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
   const buyers = folds.slice(0, n), ws = buyers.map((b) => b.wallet), wset = new Set(ws);
   const txh = [...new Set(buyers.flatMap((b) => [...b.txs.keys()]))];
 
-  const [later, bals, signers, funders, firsts, quotes, [eth]] = await Promise.all([
+  const [later, bals, signers, funders, firsts, quotes, prices, decs] = await Promise.all([
     ws.length ? rows<Parameters<typeof tf>[0]>(
       `SELECT ${TF_COLS} FROM kept_transfers FINAL WHERE token = {t:String} AND block >= {a:UInt64} AND standard = 'erc20' AND sign = 1
        AND (\`from\` IN {w:Array(String)} OR \`to\` IN {w:Array(String)}) ORDER BY block, log_index LIMIT {m:UInt32}`, { t, a: from, w: ws, m: MAX_LATER_ROWS }).then((r) => r.map(tf)) : [],
@@ -149,14 +152,19 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
     ws.length || deployer ? rows<{ dst: string; src: string; block: string }>(
       `SELECT dst, src, block FROM native_edges FINAL WHERE dst IN {w:Array(String)} ORDER BY block, tx_index, path LIMIT 1 BY dst`,
       { w: [...ws, ...(deployer ? [deployer] : [])] }) : [],
-    ws.length ? rows<{ wallet: string; b: string }>("SELECT wallet, toString(min(first).1) AS b FROM agg_wallet_first WHERE wallet IN {w:Array(String)} GROUP BY wallet", { w: ws }) : [],
+    ws.length ? rows<{ wallet: string; b: string; nonce: string }>(
+      "SELECT wallet, toString(min(first).1) AS b, toString(min(first).3) AS nonce FROM agg_wallet_first WHERE wallet IN {w:Array(String)} GROUP BY wallet", { w: ws }) : [],
     txh.length ? rows<{ token: string; from: string; tx_hash: string; amount: string }>(
       `SELECT token, \`from\`, tx_hash, amount FROM kept_transfers FINAL WHERE token IN {q:Array(String)} AND block >= {a:UInt64} AND block <= {b:UInt64}
-       AND tx_hash IN {h:Array(String)} AND sign = 1`, { q: [WETH, USDG], a: from, b: to, h: txh }) : [],
-    rows<{ p: number }>(`SELECT argMaxMerge(close_usd) AS p FROM agg_candles_1m WHERE token = {z:String} AND minute <= toDateTime({at:UInt64})
-      AND minute >= toDateTime({at:UInt64}) - 3600`, { z: NATIVE_ETH, at: t0 }),
+       AND tx_hash IN {h:Array(String)} AND sign = 1`, { q: quoteTokens, a: from, b: to, h: txh }) : [],
+    rows<{ token: string; p: number }>(`SELECT token, argMaxMerge(close_usd) AS p FROM agg_candles_1m WHERE token IN {q:Array(String)}
+      AND minute <= toDateTime({at:UInt64}) AND minute >= toDateTime({at:UInt64}) - 3600 GROUP BY token`, { q: [NATIVE_ETH, ...quoteTokens], at: t0 }),
+    rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE token IN {q:Array(String)}", { q: quoteTokens }),
   ]);
-  const ethUsd = eth?.p ? Number(eth.p) : null;
+  const px = new Map(prices.filter((r) => r.p > 0).map((r) => [r.token, Number(r.p)]));
+  const ethUsd = px.get(NATIVE_ETH) ?? px.get(WETH) ?? null;
+  px.set(USDG, 1); if (ethUsd != null) { px.set(NATIVE_ETH, ethUsd); px.set(WETH, ethUsd); }
+  const dec = new Map<string, number>([[NATIVE_ETH, 18], [WETH, 18], [USDG, 6], ...decs.map((d) => [d.token, d.decimals] as [string, number])]);
 
   // ETH the signers sent with each tx, then split among the buyers by tokens received in it
   const sig = new Map(signers.map((s) => [s.hash, s]));
@@ -168,7 +176,8 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
     { s: [...new Set(funders.map((f) => f.src))] })).map((h) => [h.src, h])) : new Map<string, { edges: string; wallets: string }>();
   const deployerFunder = deployer ? fund.get(deployer)?.src ?? null : null;
   await isContract(ws.filter((a) => !code.has(a)));
-  const s = since(later, wset, markets), bal = new Map(bals.map((b) => [b.holder, BigInt(b.b)])), first = new Map(firsts.map((f) => [f.wallet, Number(f.b)]));
+  const s = since(later, wset, markets), bal = new Map(bals.map((b) => [b.holder, BigInt(b.b)]));
+  const first = new Map(firsts.filter((f) => f.nonce === "0").map((f) => [f.wallet, Number(f.b)]));
 
   // groups: the rank of the first buyer sharing the tx / block / signer, when more than one does
   const group = (key: (b: Fold) => string | undefined) => {
@@ -182,21 +191,26 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
 
   return { status: 200, body: {
     token: t, launch_block: from, launch_source: source, window: { from_block: from, to_block: to }, closed: to <= head,
-    total_supply: supply.toString(), deployer, deployer_first_funder: deployerFunder, skipped, truncated, eth_usd: ethUsd, launch_time: t0 || null,
+    total_supply: supply.toString(), deployer, deployer_first_funder: deployerFunder, skipped, truncated, pair_token: pair && pair !== ZERO ? pair : null,
+    eth_usd: ethUsd, launch_time: t0 || null,
     ...(minutes ? { minutes: perMinute(tape, new Set([...skip, ...vaults]), t0, minutes) } : {}),
     buyers: buyers.map((b, i) => {
-      let eth = 0n, usdg = 0n;
+      const raw = new Map<string, bigint>();
       for (const [h, a] of b.txs) {
         const v = sig.get(h)?.value ?? 0n, all = recvd.get(h) ?? a;
-        eth += all > 0n ? (v * a) / all : 0n;
-        for (const q of quotes) if (q.tx_hash === h && q.from === b.wallet) q.token === USDG ? (usdg += BigInt(q.amount)) : (eth += BigInt(q.amount));
+        if (v > 0n && all > 0n) raw.set(NATIVE_ETH, (raw.get(NATIVE_ETH) ?? 0n) + (v * a) / all);
+        for (const q of quotes) if (q.tx_hash === h && q.from === b.wallet) raw.set(q.token, (raw.get(q.token) ?? 0n) + BigInt(q.amount));
       }
-      const paidEth = Number(eth) / 1e18, paidUsdg = Number(usdg) / 1e6, w = s.get(b.wallet), now = bal.get(b.wallet) ?? 0n;
+      const paid = [...raw].map(([token, r]) => {
+        const d = dec.get(token), amount = d == null ? null : Number(r) / 10 ** d, p = px.get(token);
+        return { token, raw: r.toString(), amount, usd: amount != null && p != null ? amount * p : null };
+      });
+      const w = s.get(b.wallet), now = bal.get(b.wallet) ?? 0n;
       const f = fund.get(b.wallet), hub = f && hubs.get(f.src);
       return {
         rank: i + 1, block: b.block, tx_index: b.tx_index, log_index: b.log_index, tx_hash: b.tx_hash, signer: sig.get(b.tx_hash)?.from ?? null,
         wallet: b.wallet, via: via(b), from: b.from, bought: b.bought.toString(), net: b.net.toString(), pct: pct(b.net, supply),
-        paid_eth: paidEth, paid_usdg: paidUsdg, usd_in: ethUsd == null && paidEth > 0 ? null : paidEth * (ethUsd ?? 0) + paidUsdg,
+        paid, usd_in: paid.some((x) => x.usd == null) ? null : paid.reduce((a, x) => a + x.usd!, 0),
         balance: now.toString(), max_held: (w?.max ?? b.net).toString(), sold: now < (w?.max ?? b.net), sold_out: now * 10n < (w?.max ?? b.net),
         first_out_block: w?.out ?? null, first_sell_block: w?.sell ?? null,
         groups: { same_tx: gTx(b), same_block: gBlock(b), same_signer: gSigner(b) },
