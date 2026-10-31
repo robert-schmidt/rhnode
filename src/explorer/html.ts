@@ -66,9 +66,9 @@ export function ago(unix: number, now = Date.now() / 1000): string {
   return `${Math.floor(s / 86400)} d ago`;
 }
 export const utc = (unix: number) => new Date(unix * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
-/** The block time in UTC (time of day within the last day, else the date too), its age on hover. */
+/** The block time in UTC, date and time, its age on hover. */
 export const when = (unix: number, now = Date.now() / 1000) =>
-  html`<time datetime="${new Date(unix * 1000).toISOString()}" title="${ago(unix, now)}">${now - unix < 86400 ? utc(unix).slice(11, 19) : utc(unix).slice(0, 16)}</time>`;
+  html`<time datetime="${new Date(unix * 1000).toISOString()}" title="${ago(unix, now)}">${utc(unix).slice(0, 19)}</time>`;
 export const usd = (v: number) => (v >= 1 ? `$${v.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : v > 0 ? `$${v.toPrecision(4)}` : "$0");
 
 /** An inline SVG line chart (no script): points [t, v], width 100%. */

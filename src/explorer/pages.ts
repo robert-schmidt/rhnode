@@ -7,7 +7,7 @@ import { bare, lookup, methods } from "./names.ts";
 import { requested } from "../watch.ts";
 import { cards, NET24 } from "../cards.ts";
 import { earlyBuyers } from "../early.ts";
-import { PROTOCOL } from "../chain/protocol.ts";
+import { labelsOf, type Label } from "../labels.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 export type Rpc = (method: string, params: unknown[]) => Promise<{ result?: unknown; error?: { message: string } }>;
@@ -274,12 +274,41 @@ async function funding(rpc: Rpc, a: string) {
     rows<Side>(SIDE("agg_native_src", "src"), { a }),
   ]);
   const srcs = [...new Set(first.map((e) => e.peer))];
-  const [hubs, hash] = await Promise.all([
+  const [hubs, chain, labels] = await Promise.all([
     srcs.length ? rows<{ src: string; w: number }>("SELECT src, uniqMerge(peers) AS w FROM agg_native_src WHERE src IN {s:Array(String)} GROUP BY src", { s: srcs }) : [],
-    txHashes(rpc, [...first, ...funded]),
+    fundingChain(a),
+    labelsOf([a, ...srcs, ...funded.map((e) => e.peer)]),
   ]);
-  return { first, funded, inSide, outSide, hubs: new Map(hubs.map((h) => [h.src, Number(h.w)])), hash };
+  const hash = await txHashes(rpc, [...first, ...funded, ...chain.hops]);
+  return { first, funded, inSide, outSide, hubs: new Map(hubs.map((h) => [h.src, Number(h.w)])), hash, chain, labels };
 }
+
+const HUB = 1_000; // a funder of this many wallets is an exchange, solver, bridge or faucet: the chain stops there
+
+/** The funding chain: each wallet's first ETH funder, back to where the ETH came from (a hub, a labelled address, a
+ *  bridge deposit, a wallet nobody funded within our history, or a loop), at most 8 hops. Origin first. */
+async function fundingChain(a: string): Promise<{ hops: (Edge & { dst: string })[]; end: string; labels: Map<string, Label>; hubs: Map<string, number> }> {
+  const hops: (Edge & { dst: string })[] = [], seen = new Set([a]), labels = new Map<string, Label>(), hubs = new Map<string, number>();
+  let end = "no earlier funder in our history";
+  for (let at = a; ; ) {
+    const [e] = await rows<Edge>(`SELECT src AS peer, ${EDGE_COLS} FROM native_edges FINAL WHERE dst = {a:String} ORDER BY block, tx_index, path LIMIT 1`, { a: at });
+    if (!e) break;
+    hops.push({ ...e, dst: at });
+    const [[h], l] = await Promise.all([rows<{ w: number }>("SELECT uniqMerge(peers) AS w FROM agg_native_src WHERE src = {a:String}", { a: e.peer }), labelsOf([e.peer])]);
+    if (h) hubs.set(e.peer, Number(h.w));
+    if (l.has(e.peer)) { labels.set(e.peer, l.get(e.peer)!); end = "a labelled address"; break; }
+    if (BRIDGE[e.type]) { end = "a bridge deposit from L1"; break; }
+    if (Number(h?.w ?? 0) >= HUB) { end = "a hub"; break; }
+    if (seen.has(e.peer)) { end = "a loop"; break; }
+    if (hops.length === 8) { end = "8 hops (it goes on)"; break; }
+    seen.add(e.peer); at = e.peer;
+  }
+  return { hops: hops.reverse(), end, labels, hubs };
+}
+
+/** A label as a tag: exchanges and bridges plainly, flagged addresses in red, where it came from on hover. */
+export const flag = (l: Label | undefined) => !l ? "" : html` <span class="${l.kind === "flagged" ? "bad small" : "tag"}" title="${l.source === "rhnode" ? "rhnode's protocol registry"
+  : `Blockscout metadata (Open Labels Initiative and others)${l.chain === 4663 ? "" : `, the same address on chain ${l.chain}`}`}">${l.kind === "cex" ? "exchange: " : l.kind === "bridge" ? "bridge: " : l.kind === "flagged" ? "flagged: " : ""}${l.name}</span>`;
 
 /** Hashes of (block, tx_index) pairs: ClickHouse, else the node. */
 async function txHashes(rpc: Rpc, ps: { block: string; tx_index: number }[]): Promise<Map<string, string>> {
@@ -333,6 +362,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
   return { status: 200, title: `${title} ${short(a)}`, refresh: cov.from && !txb && !tfb ? 60 : undefined, body: html`
 <h1>${title}</h1><p class="mono wrap">${a}</p>
 <dl><dt>Balance</dt><dd>${eth(big(bal))}</dd>
+${fund.labels.get(a) ? html`<dt>Label</dt><dd>${flag(fund.labels.get(a))}</dd>` : ""}
 <dt>Type</dt><dd>${isContract ? html`Contract${c?.kind ? html` <span class="tag">${c.kind}</span>` : ""}` : "Account (EOA)"}</dd>
 ${impl ? html`<dt>Implementation</dt><dd>${link("address", impl, impl)}</dd>` : ""}
 ${c?.deployer ? html`<dt>Deployed by</dt><dd>${link("address", c.deployer, c.deployer)} in block ${link("block", c.block)}</dd>` : ""}
@@ -340,8 +370,9 @@ ${isContract ? html`<dt>Code</dt><dd>${(code.length - 2) / 2} bytes</dd>` : ""}<
 ${token}
 <h2>ETH funding <span class="muted small">(direct transfers that happened, ${cov.from ? html`since block ${link("block", String(cov.from))}` : "all"}; not ETH sent by contracts)</span></h2>
 <dl><dt>Received</dt><dd>${side(fund.inSide, "from")}</dd><dt>Sent</dt><dd>${side(fund.outSide, "to")}</dd></dl>
-${fund.first.length ? html`<h3>First funders</h3>${edges(fund.first, fund.hash, (e) => html`${link("address", e.peer)}${fund.hubs.get(e.peer) ? html` <span class="muted small">funded ${fund.hubs.get(e.peer)!.toLocaleString("en-US")} wallet${fund.hubs.get(e.peer) === 1 ? "" : "s"}</span>` : ""}`)}` : ""}
-${fund.funded.length ? html`<h3>First wallets it funded</h3>${edges(fund.funded, fund.hash, (e) => link("address", e.peer))}` : ""}
+${fund.chain.hops.length ? chainTable(fund.chain, fund.hash) : ""}
+${fund.first.length ? html`<h3>Earliest ETH received <span class="muted small">(the first ${fund.first.length} transfers in)</span></h3>${edges(fund.first, fund.hash, (e) => html`${link("address", e.peer)}${flag(fund.labels.get(e.peer))}${funded(fund.hubs.get(e.peer))}`)}` : ""}
+${fund.funded.length ? html`<h3>Earliest ETH sent <span class="muted small">(the first wallets it funded)</span></h3>${edges(fund.funded, fund.hash, (e) => html`${link("address", e.peer)}${flag(fund.labels.get(e.peer))}`)}` : ""}
 <h2>Transactions <span class="muted small">(${cov.from ? html`all since block ${link("block", String(cov.from))}` : "all"})</span></h2>
 ${cov.from ? html`<p class="loading"><span class="spin"></span> ${cov.scan == null
   ? html`Older ones (before block ${cov.from}) are indexed once our node has finished syncing.`
@@ -360,6 +391,15 @@ ${tfs.length === 25 ? html`<nav class="pager"><a href="/address/${a}?tfb=${tfs.a
 const side = (x: Side | undefined, dir: string) => (Number(x?.edges ?? 0)
   ? html`${eth(x!.wei)} in ${Number(x!.edges).toLocaleString("en-US")} transfers ${dir} ${Number(x!.wallets).toLocaleString("en-US")} wallets <span class="muted small">(approximate counts)</span>`
   : html`<span class="muted">none</span>`);
+const funded = (n: number | undefined) => (n ? html` <span class="muted small">funded ${n.toLocaleString("en-US")} wallet${n === 1 ? "" : "s"}</span>` : "");
+function chainTable(c: Awaited<ReturnType<typeof fundingChain>>, hash: Map<string, string>): Html {
+  const origin = c.hops[0].peer;
+  return html`<h3>Funding chain <span class="muted small">(each wallet's first ETH funder, back to where the ETH came from: ${c.end})</span></h3>
+<p>Initial funder: ${link("address", origin, origin)}${flag(c.labels.get(origin))}${funded(c.hubs.get(origin))}${BRIDGE[c.hops[0].type] ? html` <span class="tag">${BRIDGE[c.hops[0].type]}</span>` : ""}</p>
+<div class="tw"><table><tr><th>Step</th><th>From</th><th>To</th><th>Value</th><th>Time (UTC)</th><th>Tx</th></tr>
+${c.hops.map((e, i) => { const h = hash.get(`${e.block}:${e.tx_index}`); return html`<tr><td>${i + 1}</td><td>${link("address", e.peer)}${flag(c.labels.get(e.peer))}</td>
+<td>${i === c.hops.length - 1 ? html`<b>this wallet</b>` : link("address", e.dst)}</td><td>${value(e.v)}</td><td>${when(e.ts)}</td><td>${h ? link("tx", h) : link("block", e.block)}</td></tr>`; })}</table></div>`;
+}
 const edges = (es: Edge[], hash: Map<string, string>, who: (e: Edge) => Html | string) => html`<div class="tw"><table><tr><th>Tx</th><th>Time (UTC)</th><th>Address</th><th>Value</th></tr>
 ${es.map((e) => { const h = hash.get(`${e.block}:${e.tx_index}`); return html`<tr><td>${h ? link("tx", h) : link("block", e.block)}</td><td>${when(e.ts)}</td>
 <td>${who(e)}${BRIDGE[e.type] ? html` <span class="tag">${BRIDGE[e.type]}</span>` : ""}</td><td>${value(e.v)}</td></tr>`; })}</table></div>`;
@@ -397,6 +437,7 @@ async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
     earlyBuyers(upOf(rpc), t, EARLY_BLOCKS, 20).then((r) => (r.status === 200 ? r.body as Early : null)).catch(() => null),
   ]);
   const mp = card?.main_pool ?? null, d = card?.h24;
+  const lab = await labelsOf([...holders.map((h) => h.holder), ...(early?.buyers ?? []).flatMap((b) => [b.wallet, b.funding?.funder ?? ""]).filter(Boolean)]);
   const chartPool = mp?.pool ?? pools.find((p) => p.vf === 1)?.pl;
   const chart = chartPool ? await rows<{ h: number; c: number }>(
     `SELECT toUnixTimestamp(toStartOfHour(m)) AS h, argMax(cu, m) AS c FROM (
@@ -408,7 +449,7 @@ async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
   const oneSided = mp?.liquidity_usd != null && mp.liquidity_quote_usd != null && mp.liquidity_usd > 1_000 && mp.liquidity_quote_usd < 0.05 * mp.liquidity_usd;
   const wash = d ? washy(d.volume_usd, d.volume_raw_usd) : false;
   const one = d?.top_wallet && d.top_wallet.share >= 0.5 && d.volume_usd > 10_000 ? d.top_wallet : null; // one wallet makes the market
-  const what = (a: string) => { const e = PROTOCOL.get(a); return e ? html`<span class="tag">${e.label}</span>` : ownSet.has(a) ? html`<span class="tag">pool</span>` : a === t ? html`<span class="tag">token contract</span>` : ""; };
+  const what = (a: string) => lab.has(a) ? flag(lab.get(a)) : ownSet.has(a) ? html`<span class="tag">pool</span>` : a === t ? html`<span class="tag">token contract</span>` : "";
   const tile = (v: unknown, k: unknown) => html`<div><b>${v}</b><span>${k}</span></div>`;
   return html`<h2>Token</h2>
 <div class="stats">${tile(money(mp?.price_usd), "price, main pool")}
@@ -433,22 +474,22 @@ ${pools.length ? html`<h3>Pools (24 h)</h3><div class="tw"><table><tr><th>Pool</
 ${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${quote(p.q)}</td><td class="num">${usd(p.vol)}</td><td class="num muted">${usd(p.raw)}</td>
 <td>${p.pl === mp?.pool ? html`<span class="tag">main</span> ` : ""}${p.vf ? "" : html`<span class="bad small">unverified</span> `}${washy(p.vol, p.raw) ? html`<span class="bad small">wash</span> ` : ""}${p.hk && !/^0x0*$/.test(p.hk) ? html`<span class="tag">hook</span>` : ""}</td></tr>`)}</table></div>
 <p class="muted small">Volume is net: a transaction's buys and sells in one pool cancel, so round trips (wash trading) count for nothing; Gross counts every swap. Sell-side liquidity is the ETH or USDG a seller can receive from the main pool within ×/÷10,000 of the price.</p>` : ""}
-${early?.buyers.length ? earlyTable(early) : ""}
+${early?.buyers.length ? earlyTable(early, lab) : ""}
 ${holders.length ? html`<h3>Top holders</h3><div class="tw"><table><tr><th>Holder</th><th></th><th>Balance</th><th>Share</th></tr>
 ${holders.map((h) => html`<tr><td>${link("address", h.holder)}</td><td>${what(h.holder)}</td><td>${units(h.bal, tok.decimals, 2)}</td><td>${supply > 0n ? `${(Number((BigInt(h.bal) * 10000n) / supply) / 100).toFixed(2)}%` : ""}</td></tr>`)}</table></div>
 <p class="muted small">The top 10 share leaves out pools, lockers, burn addresses and other protocol contracts.</p>` : ""}`;
 }
 
-function earlyTable(e: Early): Html {
+function earlyTable(e: Early, lab: Map<string, Label>): Html {
   const now = (b: Early["buyers"][number]) => b.sold_out ? html`<span class="bad small">sold out</span>` : b.sold ? html`<span class="small">sold some</span>` : html`<span class="ok small">holds</span>`;
   const tags = (b: Early["buyers"][number]) => html`${b.groups.same_tx ? html`<span class="tag" title="same transaction as #${b.groups.same_tx}">tx #${b.groups.same_tx}</span> ` : ""}${b.groups.same_signer
     ? html`<span class="tag" title="same signer as #${b.groups.same_signer}">signer #${b.groups.same_signer}</span> ` : ""}${b.groups.same_block && !b.groups.same_tx ? html`<span class="tag" title="same block as #${b.groups.same_block}">block #${b.groups.same_block}</span> ` : ""}${b.first_out_block && !b.first_sell_block
     ? html`<span class="tag" title="sent tokens out without selling">moved out</span>` : ""}`;
-  const fund = (b: Early["buyers"][number]) => !b.funding ? html`<span class="muted">—</span>` : html`${link("address", b.funding.funder)}${b.funding.funder_is_deployer
+  const fund = (b: Early["buyers"][number]) => !b.funding ? html`<span class="muted">—</span>` : html`${link("address", b.funding.funder)}${flag(lab.get(b.funding.funder))}${b.funding.funder_is_deployer
     ? html` <span class="bad small">deployer</span>` : b.funding.funder_shared_with_deployer ? html` <span class="bad small">deployer's funder</span>` : ""}${b.funding.funder_peers > 1 ? html` <span class="muted small">funded ${b.funding.funder_peers.toLocaleString("en-US")}</span>` : ""}`;
   return html`<h3>Early buyers <span class="muted small">(first ${EARLY_BLOCKS} blocks after the ${e.launch_source === "pool" ? "first pool" : e.launch_source === "mint" ? "first mint" : `${e.launch_source} launch`} in block ${link("block", e.launch_block)}${e.closed ? "" : ", still open"})</span></h3>
 <div class="tw"><table><tr><th>#</th><th>Wallet</th><th>Via</th><th class="num">Paid</th><th class="num">Supply</th><th>Now</th><th>Funded by</th><th></th></tr>
-${e.buyers.map((b) => html`<tr><td>${link("tx", b.tx_hash, String(b.rank))}</td><td>${link("address", b.wallet)}${b.wallet === e.deployer ? html` <span class="bad small">deployer</span>` : ""}</td><td>${b.via}</td>
+${e.buyers.map((b) => html`<tr><td>${link("tx", b.tx_hash, String(b.rank))}</td><td>${link("address", b.wallet)}${flag(lab.get(b.wallet))}${b.wallet === e.deployer ? html` <span class="bad small">deployer</span>` : ""}</td><td>${b.via}</td>
 <td class="num">${money(b.usd_in)}</td><td class="num">${b.pct == null ? "" : `${b.pct.toFixed(2)}%`}</td><td>${now(b)}</td><td>${fund(b)}</td><td>${tags(b)}</td></tr>`)}</table></div>
 <p class="muted small">Wallets that received the token and kept a net positive amount in the window, curve and pool buys alike; pools, curves, protocol contracts and ${e.skipped} other market addresses aren't buyers. Same-number tags mark wallets that bought in one transaction, with one signer, or in one block. "Moved out" sent tokens away without selling (a side wallet, often).</p>`;
 }
