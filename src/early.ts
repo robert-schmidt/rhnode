@@ -91,7 +91,20 @@ const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) 
 
 export type Reply = { status: number; body: unknown };
 
-export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, minutes = 0): Promise<Reply> {
+// memoised 30 s per query, shared by the API and the explorer. ponytail: a closed window could be cached for good, but
+// balances and funding move; split the two if this ever shows up as load.
+const memo = new Map<string, { at: number; p: Promise<Reply> }>();
+export function earlyBuyers(up: Up, t: string, blocks: number, n: number, minutes = 0): Promise<Reply> {
+  const k = `${t}:${blocks}:${n}:${minutes}`, m = memo.get(k);
+  if (m && Date.now() - m.at < 30_000) return m.p;
+  if (memo.size > 5_000) memo.clear();
+  const p = build(up, t, blocks, n, minutes);
+  memo.set(k, { at: Date.now(), p });
+  p.catch(() => memo.delete(k));
+  return p;
+}
+
+async function build(up: Up, t: string, blocks: number, n: number, minutes: number): Promise<Reply> {
   const [[meta], [launch], pools, [created], [tip]] = await Promise.all([
     rows<{ supply: string }>("SELECT toString(total_supply) AS supply FROM serve_tokens FINAL WHERE token = {t:String}", { t }),
     rows<{ block: string; source: string; deployer: string; detail: string }>(
