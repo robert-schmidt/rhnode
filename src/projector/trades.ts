@@ -9,7 +9,7 @@
 // A trade needs both: a priced swap of the token in the actor's segment AND a net change in the actor's own
 // balance of it. A router or solver moving tokens for someone else changes nothing of its own and isn't a trade.
 import { insert, inSpan, rows, span } from "../ch.ts";
-import { USDG } from "../chain/constants.ts";
+import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 export const USER_OP_EVENT = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
 
@@ -40,7 +40,7 @@ export function tradesOfTx(signer: string, transfers: Transfer[], prices: Price[
       out.push({
         wallet: seg.actor, token, amount: delta, via: seg.via,
         usd: same.reduce((a, p) => a + p.usd, 0),
-        eth: same.filter((p) => p.quote !== USDG).reduce((a, p) => a + p.quote_amount, 0),
+        eth: same.filter((p) => p.quote === WETH || p.quote === NATIVE_ETH).reduce((a, p) => a + p.quote_amount, 0),
       });
     }
   }

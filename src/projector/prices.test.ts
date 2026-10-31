@@ -49,3 +49,16 @@ test("curve: execution price like v2 (0.05 ETH for 2.8059e7 tokens), a buy is +t
   close(p.price, 0.05 / 28_059_000);
   close(p.usd, 150);
 });
+
+test("bridges: a token/token pool is priced through the side with its own quote-asset price (two hops at most)", () => {
+  const GME = "0x2222222222222222222222222222222222222222", NVDA = "0x3333333333333333333333333333333333333333";
+  const b = new Map([[GME, { dec: 18, usd: 25, vol: 50_000 }], [NVDA, { dec: 18, usd: 180, vol: 90_000 }]]);
+  assert.deepEqual(sides(TOKEN, GME, b), { token: TOKEN, quote: GME, tokenIs0: true });
+  assert.deepEqual(sides(GME, TOKEN, b), { token: TOKEN, quote: GME, tokenIs0: false });
+  assert.deepEqual(sides(GME, NVDA, b), { token: GME, quote: NVDA, tokenIs0: true }); // both bridges: more volume quotes
+  assert.equal(sides(TOKEN, GME), null);
+  assert.deepEqual(sides(TOKEN, WETH, b), { token: TOKEN, quote: WETH, tokenIs0: true }); // quote assets come first
+  // v2 sell of 1,000 TOKEN for 2 GME (pool-side amounts): 0.002 GME a token, $0.05; $50 moved
+  const p = priceSwap({ venue: "v2", a0: (10n ** 21n).toString(), a1: (-2n * 10n ** 18n).toString(), sqrt: "0", token0: TOKEN, token1: GME }, 18, 3000, b)!;
+  assert.equal(p.quote, GME); assert.ok(Math.abs(p.price - 0.002) < 1e-12); assert.ok(Math.abs(p.priceUsd - 0.05) < 1e-12); assert.ok(Math.abs(p.usd - 50) < 1e-9);
+});

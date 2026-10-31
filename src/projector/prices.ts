@@ -1,13 +1,22 @@
 // Swap → price (migrations/004_prices.sql). v3/v4 price is the pool's price AFTER the swap (sqrtPriceX96);
 // v2 and curves have no price word, so it is the swap's execution price (v2: fee included; a curve: fees excluded).
+// A pool of two non-quote tokens (a launch paired with a tokenised stock) is priced through a bridge, never more than two
+// hops: the side with its own price against WETH/ETH/USDG in the range is the quote (both: the one with more such volume),
+// at the median of its ≥ $100 swaps in verified quote pools in the range, else its last such price in the BRIDGE_BLOCKS
+// before. Under BRIDGE_MIN_USD of that volume: no price, never a guess (rule shared with the app's onchain-market pricing).
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 export const QUOTE_DECIMALS: Record<string, number> = { [USDG]: 6, [WETH]: 18, [NATIVE_ETH]: 18 };
 const isEth = (a: string) => a === WETH || a === NATIVE_ETH;
 
-/** The pool's token and quote side. An ETH/USDG pool prices ETH in USDG; WETH/ETH and token/token pools: null. */
-export function sides(t0: string, t1: string): { token: string; quote: string; tokenIs0: boolean } | null {
+/** A bridge quote for a range: its decimals, USD price and USD volume against a quote asset. */
+export type Bridge = { dec: number; usd: number; vol: number };
+const BRIDGE_BLOCKS = 20_000, BRIDGE_MIN_USD = 1_000; // ~35 min of chain
+
+/** The pool's token and quote side. An ETH/USDG pool prices ETH in USDG; WETH/ETH pools: null; token/token pools: the
+ *  bridge side is the quote (both bridges: the one with more volume), null without one. */
+export function sides(t0: string, t1: string, bridges?: Map<string, Bridge>): { token: string; quote: string; tokenIs0: boolean } | null {
   const q0 = t0 in QUOTE_DECIMALS, q1 = t1 in QUOTE_DECIMALS;
   if (q0 && q1) {
     if (t1 === USDG && isEth(t0)) return { token: t0, quote: t1, tokenIs0: true };
@@ -16,6 +25,9 @@ export function sides(t0: string, t1: string): { token: string; quote: string; t
   }
   if (q1) return { token: t0, quote: t1, tokenIs0: true };
   if (q0) return { token: t1, quote: t0, tokenIs0: false };
+  const b0 = bridges?.get(t0), b1 = bridges?.get(t1);
+  if (b0 && (!b1 || b0.vol >= b1.vol)) return { token: t1, quote: t0, tokenIs0: false };
+  if (b1) return { token: t0, quote: t1, tokenIs0: true };
   return null;
 }
 
@@ -23,15 +35,15 @@ export type Swap = { venue: "v2" | "v3" | "v4" | "curve"; a0: string; a1: string
 
 /** PURE. Trader-side deltas (+ = received), price in quote per token (human units), quote amount. null when
  *  the pool isn't against a quote asset, the token's decimals are unknown, or the swap moved no token. */
-export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: number | null) {
-  const side = sides(s.token0, s.token1);
+export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: number | null, bridges?: Map<string, Bridge>) {
+  const side = sides(s.token0, s.token1, bridges);
   if (!side || tokenDecimals === undefined || tokenDecimals < 0) return null;
   // Emitted amounts are pool-side on v2/v3 and trader-side on v4 (measured, see the migration).
   const flip = (a: string) => (s.venue === "v4" ? BigInt(a) : -BigInt(a));
   const d0 = flip(s.a0), d1 = flip(s.a1);
   const tokenDelta = side.tokenIs0 ? d0 : d1, quoteDelta = side.tokenIs0 ? d1 : d0;
   if (tokenDelta === 0n) return null;
-  const dq = QUOTE_DECIMALS[side.quote];
+  const b = bridges?.get(side.quote), dq = QUOTE_DECIMALS[side.quote] ?? b!.dec;
   let raw: number;
   const sqrt = Number(BigInt(s.sqrt));
   if (s.venue !== "v2" && sqrt > 0) {
@@ -40,7 +52,7 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
   } else raw = Math.abs(Number(quoteDelta) / Number(tokenDelta));
   const price = raw * 10 ** (tokenDecimals - dq);
   const quoteAmount = Math.abs(Number(quoteDelta)) / 10 ** dq;
-  const toUsd = side.quote === USDG ? 1 : ethUsd ?? 0;
+  const toUsd = side.quote === USDG ? 1 : b ? b.usd : ethUsd ?? 0;
   return { ...side, tokenDelta, quoteDelta, price, quoteAmount, priceUsd: price * toUsd, usd: quoteAmount * toUsd };
 }
 
@@ -85,9 +97,10 @@ async function priceRange(from: number, to: number, only: string, fixedEthUsd: n
   if (fixedEthUsd != null) ethUsd = fixedEthUsd; // ponytail: the backfill sets the module's ETH/USD; the live projector's next range resets it
   else if (ethPrices.length) ethUsd = ethPrices[Math.floor(ethPrices.length / 2)];
 
+  const bridges = await bridgesOf(from, swaps, decimals);
   const out = [];
   for (const s of swaps) {
-    const p = priceSwap(s, decimals.get(sides(s.token0, s.token1)?.token ?? ""), ethUsd);
+    const p = priceSwap(s, decimals.get(sides(s.token0, s.token1, bridges)?.token ?? ""), ethUsd, bridges);
     if (!p) continue;
     out.push({
       block: s.block, tx_index: s.tx_index, log_index: s.log_index, tx_hash: s.tx_hash, time: s.time, pool: s.pool, venue: s.venue,
@@ -98,4 +111,37 @@ async function priceRange(from: number, to: number, only: string, fixedEthUsd: n
   }
   await insert("ev_prices", out, `${only ? "curve-" : ""}prices:${from}-${to}`);
   return out.length;
+}
+
+/** The bridges for a range's token/token pools: either side priced against a quote asset in the range (verified pools,
+ *  swaps ≥ $100), else in the BRIDGE_BLOCKS before it (ev_prices); kept when that volume reaches BRIDGE_MIN_USD. */
+async function bridgesOf(from: number, swaps: (Swap & { verified: number })[], decimals: Map<string, number>): Promise<Map<string, Bridge>> {
+  const need = [...new Set(swaps.filter((s) => !(s.token0 in QUOTE_DECIMALS) && !(s.token1 in QUOTE_DECIMALS)).flatMap((s) => [s.token0, s.token1]))]
+    .filter((t) => (decimals.get(t) ?? -1) >= 0), needs = new Set(need);
+  if (!need.length) return new Map();
+  const here = new Map<string, number[]>(), vol = new Map<string, number>();
+  for (const s of swaps) {
+    if (!s.verified) continue;
+    const p = priceSwap(s, decimals.get(sides(s.token0, s.token1)?.token ?? ""), ethUsd);
+    if (!p || p.usd < 100 || !needs.has(p.token)) continue;
+    (here.get(p.token) ?? here.set(p.token, []).get(p.token)!).push(p.priceUsd);
+    vol.set(p.token, (vol.get(p.token) ?? 0) + p.usd);
+  }
+  const before = new Map<string, number>();
+  for (let i = 0; i < need.length; i += 300) { // query parameters travel in the URL
+    for (const r of await rows<{ token: string; pu: number; vu: number }>(
+      `SELECT token, argMax(price_usd, (block, log_index)) AS pu, sum(usd) AS vu FROM ev_prices
+       WHERE token IN {t:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String}) AND verified = 1 AND usd >= 100 AND sign = 1
+         AND block > {lo:UInt64} AND block <= {from:UInt64} GROUP BY token`,
+      { t: need.slice(i, i + 300), w: WETH, n: NATIVE_ETH, u: USDG, lo: Math.max(0, from - BRIDGE_BLOCKS), from })) {
+      before.set(r.token, Number(r.pu));
+      vol.set(r.token, (vol.get(r.token) ?? 0) + Number(r.vu));
+    }
+  }
+  const out = new Map<string, Bridge>();
+  for (const t of need) {
+    const ps = here.get(t)?.sort((a, b) => a - b), usd = ps ? ps[Math.floor(ps.length / 2)] : before.get(t);
+    if (usd && (vol.get(t) ?? 0) >= BRIDGE_MIN_USD) out.set(t, { dec: decimals.get(t)!, usd, vol: vol.get(t)! });
+  }
+  return out;
 }

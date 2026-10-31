@@ -6,6 +6,8 @@
 //   verified first, then most net USD volume in 24 h, then most ever (1-minute candles);
 // - net volume: a tx's swaps in one pool count as what is left after buys and sells cancel (a same-tx round trip, wash,
 //   counts ~0); the *_raw_usd fields keep the gross, so wash shows as the gap;
+// - a main pool against a non-quote token is priced through it (quote_via: its last hour's USD price, the projector's
+//   bridge rule in projector/prices.ts); without such a price, the pool has none;
 // - liquidity_usd from the pool's state at the tip: a bonding curve's real quote balance (price: its last trade); v2 reserves; v3 and v4 active liquidity (the tokens the positions
 //   hold within ×/÷10,000 of the price, by a walk over the initialized ticks: a full-range pool gives its reserves, a
 //   one-tick position its real size, not its virtual reserves); liquidity_quote_usd the quote side alone (what a sell
@@ -182,12 +184,26 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
          ORDER BY b DESC LIMIT 10 BY token) GROUP BY token`, { t: full, x: exclude }),
   ]) : [[], []];
 
+  // A main pool against a non-quote token (a launch paired with a tokenised stock) is priced through it: its last USD
+  // price in the hour from ≥ $100 swaps in verified quote pools, with ≥ $1,000 of them (the projector's bridge rule)
+  const other = (p: Pool) => (p.token0 === p.token ? p.token1 : p.token0);
+  const via = [...new Set([...P.values()].filter((p) => !sides(p.token0, p.token1)).map(other))];
+  const [bp, bd] = via.length ? await Promise.all([
+    rows<{ token: string; pu: number }>(
+      `SELECT token, argMax(price_usd, (block, log_index)) AS pu FROM ev_prices WHERE token IN {b:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String})
+       AND verified = 1 AND usd >= 100 AND sign = 1 AND time >= now() - INTERVAL 1 HOUR GROUP BY token HAVING sum(usd) >= 1000`, { b: via, w: WETH, n: NATIVE_ETH, u: USDG }),
+    rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE token IN {b:Array(String)}", { b: via }),
+  ]) : [[], []];
+  const bdec = new Map(bd.map((r) => [r.token, r.decimals]));
+  const B = new Map(bp.filter((r) => (bdec.get(r.token) ?? -1) >= 0).map((r) => [r.token, { usd: Number(r.pu), dec: bdec.get(r.token)! }]));
+  const sideOf = (p: Pool) => sides(p.token0, p.token1) ?? (B.has(other(p)) ? { token: p.token, quote: other(p), tokenIs0: p.token0 === p.token } : null);
+
   // The main pools' state at the tip, one multicall
   const calls: Call[] = [], slots = new Map<string, number>();
   for (const p of P.values()) {
     slots.set(p.token, calls.length);
     if (p.venue === "v2") calls.push({ target: p.pool, abi: V2, fn: "getReserves" });
-    else if (p.venue === "curve") { const q = sides(p.token0, p.token1)?.quote;
+    else if (p.venue === "curve") { const q = other(p);
       calls.push(q === NATIVE_ETH || !q ? { target: MULTICALL3, abi: MC3, fn: "getEthBalance", args: [p.pool] } : { target: q, abi: ERC20, fn: "balanceOf", args: [p.pool] }); }
     else if (p.venue === "v3") calls.push({ target: p.pool, abi: V3, fn: "slot0" }, { target: p.pool, abi: V3, fn: "liquidity" },
       { target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
@@ -249,16 +265,16 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     const pad = sum([...LAUNCHPADS, ...(curve(tk) ? [curve(tk)!] : [])].map((a) => h.get(a) ?? 0n));
     const top10 = top.find((r) => r.token === tk);
     let main: Card | null = null;
-    const p = P.get(tk), sd = p && sides(p.token0, p.token1);
+    const p = P.get(tk), sd = p && sideOf(p);
     if (p && sd && sd.token === tk) {
       // multicall answers: a tuple (getReserves, slot0, getSlot0) or a bigint (liquidity, balanceOf), null on failure
       const w = (k: number) => at(tk, k);
-      const qUsd = sd.quote === USDG ? 1 : eu, pn = AGO.get(tk)?.pn;
+      const b = B.get(sd.quote), qUsd = sd.quote === USDG ? 1 : b ? b.usd : eu, pn = AGO.get(tk)?.pn;
       const st = p.venue === "v2" ? { r0: w(0)?.[0], r1: w(0)?.[1] } : p.venue === "curve" ? { q: w(0) as bigint | undefined, last: pn && qUsd ? pn / qUsd : null }
         : { sqrt: w(0)?.[0], L: w(1), b0: w(2), b1: w(3), band: bands.get(tk) };
-      const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote], qUsd, st);
+      const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote] ?? b!.dec, qUsd, st);
       main = {
-        pool: p.pool, venue: p.venue, quote: sd.quote, verified: p.verified === 1, official: p.official === 1, created_block: Number(p.created_block) || null,
+        pool: p.pool, venue: p.venue, quote: sd.quote, quote_via: b ? sd.quote : null, verified: p.verified === 1, official: p.official === 1, created_block: Number(p.created_block) || null,
         price: ms?.price ?? null, price_usd: ms?.price != null && qUsd != null ? ms.price * qUsd : null,
         liquidity_usd: ms?.liquidityUsd ?? null, liquidity_quote_usd: ms?.quoteUsd ?? null, liquidity_kind: ms?.kind ?? null,
         ...(p.venue === "v3" ? { liquidity_balances_usd: ms?.balancesUsd ?? null } : {}),
