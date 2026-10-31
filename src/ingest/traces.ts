@@ -30,15 +30,16 @@ export function flatten(block: number, time: number, tx_index: number, tx_hash: 
   return out;
 }
 
+// One request per block, in parallel: a JSON-RPC batch of 10 traces passed Nitro's batch response limit on a heavy block
+// ("response too large"), and retrying it opened four 1,000-block gaps on 2026-10-31. A single call has no such limit.
 async function trace(node: string, hashes: string[]): Promise<{ txHash: string; result?: Frame; error?: string }[][]> {
-  const req = hashes.map((h, id) => ({ jsonrpc: "2.0", id, method: "debug_traceBlockByHash", params: [h, { tracer: "callTracer" }] }));
-  const r = await fetch(node, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req), signal: AbortSignal.timeout(30_000) });
-  const j = (await r.json()) as { id: number; result?: { txHash: string; result?: Frame; error?: string }[]; error?: { message: string } }[];
-  if (!Array.isArray(j)) throw new Error(`debug_traceBlockByHash: HTTP ${r.status}`);
-  j.sort((a, b) => a.id - b.id);
-  const bad = j.find((x) => !x.result);
-  if (bad) throw new Error(`debug_traceBlockByHash ${hashes[bad.id]}: ${bad.error?.message}`);
-  return j.map((x) => x.result!);
+  return Promise.all(hashes.map(async (h) => {
+    const r = await fetch(node, { method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "debug_traceBlockByHash", params: [h, { tracer: "callTracer" }] }) });
+    const j = (await r.json()) as { result?: { txHash: string; result?: Frame; error?: string }[]; error?: { message: string } };
+    if (!j.result) throw new Error(`debug_traceBlockByHash ${h}: ${j.error?.message ?? `HTTP ${r.status}`}`);
+    return j.result;
+  }));
 }
 
 const cursor = async (name: string) =>
