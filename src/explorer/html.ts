@@ -2,6 +2,7 @@
 // so a page can only contain markup we wrote. Formatters are pure.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { cfg } from "../config.ts";
 
 /** The stylesheet, served at a content-hashed URL so a new version never meets a cached old one. */
 export const CSS = readFileSync(new URL("./style.css", import.meta.url));
@@ -34,12 +35,13 @@ export function page(title: string, body: Html, opts: { q?: string; refresh?: nu
   const refresh = opts.refresh ? html`<meta http-equiv="refresh" content="${opts.refresh}">` : "";
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.live ? html`<noscript>${refresh}</noscript>` : refresh}
-<title>${title} · Robinhood Chain explorer</title><link rel="stylesheet" href="${CSS_PATH}">${opts.live ? html`<script src="${JS_PATH}" defer></script>` : ""}
+<title>${title} · Robinhood Chain Explorer</title><link rel="stylesheet" href="${CSS_PATH}">${opts.live ? html`<script src="${JS_PATH}" defer></script>` : ""}
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
-<body><header><div class="bar"><a class="brand" href="/">rh<span>node</span> explorer</a>
+<body><header><div class="bar"><a class="brand" href="/">Robinhood <span>Chain</span> Explorer</a>
 <form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off" enterkeyhint="search"><button>Search</button></form></div></header>
 <main>${body}</main>
-<footer>Robinhood Chain (4663), read from our own node and ClickHouse index. Open source:
+<footer>Robinhood Chain (4663), read from our own node and ClickHouse index. An independent explorer, not affiliated with Robinhood.
+${cfg.explorer.credit ? html`<a href="${cfg.explorer.credit.url}" rel="noopener">${cfg.explorer.credit.text}</a> · ` : ""}Open source:
 <a href="${REPO}" rel="noopener">${REPO.replace("https://", "")}</a> · <a href="/access">access</a> · <a href="/health">status</a></footer>
 </body></html>`.s;
 }

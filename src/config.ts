@@ -70,6 +70,8 @@ export const cfg = {
     repo: env.EXPLORER_REPO ?? "", // default: the repo the footer links
     /** The issue's author must also have starred the repo. */
     requireStar: env.EXPLORER_REQUIRE_STAR !== "0",
+    /** Optional footer credit, "text|https://url" (e.g. who the deployment is run for); none when unset. */
+    credit: ((c) => (c.length === 2 && /^https:\/\/[^\s"<>]+$/.test(c[1]) ? { text: c[0], url: c[1] } : null))((env.EXPLORER_CREDIT ?? "").split("|")),
     /** Optional: a GitHub token (no scopes) lifts the keyless 60 requests/h. Never logged. */
     githubToken: env.GITHUB_TOKEN ?? "",
     /** GitHub logins whose tokens no longer work. */
