@@ -95,7 +95,7 @@ const mc = (up: Up, cs: Call[]) => Promise.all(Array.from({ length: Math.ceil(cs
 
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const t = tokens;
-  const [meta, launches, cands, ownPools, trades, vols, eu, [tip], tops] = await Promise.all([
+  const [meta, launches, cands, trades, vols, eu, [tip], tops] = await Promise.all([
     rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
       "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t }),
     rows<{ token: string; deployer: string; source: string; block: string; time: number; detail: string }>(
@@ -109,7 +109,6 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
        LEFT JOIN (${NET24}) AS n ON n.token = c.token AND n.pool = c.pool
        INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL WHERE ok = 1) AS p ON p.pool = c.pool
        ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token`, { t }),
-    rows<{ pool: string; hooks: string }>("SELECT pool, hooks FROM pools FINAL WHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}", { t }),
     rows<{ token: string; buys: string; sells: string; buyers: string; sellers: string }>(
       `SELECT token, sumIf(sign, side = 'buy') AS buys, sumIf(sign, side = 'sell') AS sells,
          uniqExactIf(wallet, side = 'buy' AND sign = 1) AS buyers, uniqExactIf(wallet, side = 'sell' AND sign = 1) AS sellers
@@ -130,7 +129,9 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   // Holdings that aren't circulating, and top10 without protocol addresses (only for tokens whose history is complete)
   const full = t.filter((tk) => M.get(tk)?.complete);
   const special = [DEAD, ...LOCKERS, ...LAUNCHPADS, ...curves];
-  const exclude = [...PROTOCOL.keys(), ...curves, ...ownPools.flatMap((p) => [p.pool, p.hooks]).filter((a) => ADDR.test(a))];
+  // the tokens' own pools and hooks are left out in the query: a quote token like WETH has thousands, and query
+  // parameters travel in the URL (a cold batch with WETH in it failed "URI too long")
+  const exclude = [...PROTOCOL.keys(), ...curves];
   const [held, top] = full.length ? await Promise.all([
     rows<{ token: string; holder: string; amt: string }>(
       `SELECT token, holder, toString(b) AS amt FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances
@@ -138,6 +139,8 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     rows<{ token: string; top: string }>(
       `SELECT token, toString(sum(b)) AS top FROM (SELECT token, holder, b FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances
          WHERE token IN {t:Array(String)} GROUP BY token, holder HAVING b > 0) WHERE holder NOT IN {x:Array(String)} AND holder != token
+           AND holder NOT IN (SELECT toFixedString(a, 42) FROM pools FINAL ARRAY JOIN [pool, hooks] AS a
+             WHERE (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}) AND length(a) = 42)
          ORDER BY b DESC LIMIT 10 BY token) GROUP BY token`, { t: full, x: exclude }),
   ]) : [[], []];
 
