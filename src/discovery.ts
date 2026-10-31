@@ -15,7 +15,8 @@
 //   others are looked at again hourly (daily after a week).
 // - curve_payouts (migration 025): native ETH out of a curve from tip traces, LAG blocks behind them (a new token's
 //   curve is found within the hour of its first trades, so its payouts are scanned after it is known); ERC-20 quotes
-//   out of a curve from kept_transfers, recomputed hourly (it reaches back with the history pass).
+//   out of a curve from kept_transfers, hourly (it reaches back with the history pass): only rows not stored yet, or
+//   stored without a USD value that has one now (pre-go-live prices come later), so a rerun writes nothing.
 // Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass: while the pass
 // runs, it rests DISCOVERY_REST times as long as a round took (each token read touches a granule in every kept_transfers
 // part, ~260K rows whatever its size: measured 2026-10-31, unthrottled it cut the pass from ~800 to ~250 inserts per 5 min).
@@ -230,7 +231,9 @@ export const ERC20_PAYOUTS = `INSERT INTO curve_payouts
   LEFT JOIN (SELECT token AS pt, toStartOfHour(time) AS h, avg(price_usd) AS pu FROM ev_prices WHERE quote IN ${ANCHORS} AND verified = 1 AND usd >= 100
     GROUP BY pt, h) AS p ON p.pt = k.token AND p.h = toStartOfHour(k.time)
   LEFT JOIN (SELECT token AS dt, decimals AS dc FROM serve_tokens FINAL) AS d ON d.dt = k.token
-  WHERE (k.token, k.from) NOT IN ${OWN}`;
+  WHERE (k.token, k.from) NOT IN ${OWN}
+    AND (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts WHERE source = 'transfer' AND usd IS NOT NULL)
+    AND (u IS NOT NULL OR (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts WHERE source = 'transfer'))`;
 
 let erc20At = 0;
 async function payouts(): Promise<number> {
