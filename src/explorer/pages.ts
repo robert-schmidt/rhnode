@@ -2,7 +2,7 @@
 // JSON-RPC); lists, tokens, pools and prices from ClickHouse (14 days raw, kept_* and agg_* forever).
 // Every id reaching a query has passed the regexes in index.ts, and every query takes bound parameters.
 import { rows } from "../ch.ts";
-import { age, ago, compact, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
+import { ago, compact, stamp, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
 import { bare, lookup, methods } from "./names.ts";
 import { requested } from "../watch.ts";
 import { cards, NET24 } from "../cards.ts";
@@ -139,11 +139,11 @@ async function latest(rpc: Rpc) {
   const movesBy = new Map<string, Move[]>();
   for (const m of mv) movesBy.set(m.tx_hash, [...(movesBy.get(m.tx_hash) ?? []), { token: m.token, amount: BigInt(m.amt), nft: m.standard !== "erc20" }]);
   const now = Date.now() / 1000;
-  const blockRows = blocks.map((b) => html`<li data-k="${b.number}" data-o="${b.number}"><div>${link("block", b.number)}<span class="sub">${age(b.ts, now)}</span></div>
+  const blockRows = blocks.map((b) => html`<li data-k="${b.number}" data-o="${b.number}"><div>${link("block", b.number)}<span class="sub">${stamp(b.ts, now)}</span></div>
 <div class="num">${b.tx_count}<span class="sub">${b.tx_count === 1 ? "tx" : "txs"}</span></div><div class="num">${Number(b.gas_used).toLocaleString("en-US")}<span class="sub">gas</span></div></li>`);
   const txRows = txs.map((t) => {
     const m = method(t.to || null, t.created ? "" : t.selector, names);
-    return html`<li data-k="${t.hash}" data-o="${t.o}"${t.status ? "" : html` class="failed"`}><div class="h">${link("tx", t.hash)}<span class="sub">${/^0x[0-9a-f]{8}$/.test(m) ? html`<span class="sel" title="method not named">${m}</span>` : html`<span class="tag">${m}</span>`}${t.status ? "" : html` <span class="tag bad">failed</span>`} ${age(t.ts, now)}</span></div>
+    return html`<li data-k="${t.hash}" data-o="${t.o}"${t.status ? "" : html` class="failed"`}><div class="h">${link("tx", t.hash)}<span class="sub">${/^0x[0-9a-f]{8}$/.test(m) ? html`<span class="sel" title="method not named">${m}</span>` : html`<span class="tag">${m}</span>`}${t.status ? "" : html` <span class="tag bad">failed</span>`} ${stamp(t.ts, now)}</span></div>
 <div class="ft">${link("address", t.from)}<span class="sub">→ ${t.created ? link("address", t.created, "new contract") : t.to ? link("address", t.to) : "—"}</span></div>
 <div class="mv">${glance(BigInt(t.v), movesBy.get(t.hash) ?? [], meta)}</div></li>`;
   });

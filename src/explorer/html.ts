@@ -75,6 +75,9 @@ export const when = (unix: number, now = Date.now() / 1000) =>
   html`<time datetime="${new Date(unix * 1000).toISOString()}" title="${ago(unix, now)}">${utc(unix).slice(0, 19)}</time>`;
 /** Its age, kept current by live.js (data-ts); the UTC time on hover. */
 export const age = (unix: number, now = Date.now() / 1000) => html`<time class="age" data-ts="${unix}" datetime="${new Date(unix * 1000).toISOString()}" title="${utc(unix)}">${ago(unix, now)}</time>`;
+/** The time of day in UTC, then its age (kept current by live.js): "18:51:03 UTC · 3 s ago"; the full date on hover. */
+export const stamp = (unix: number, now = Date.now() / 1000) =>
+  html`<span class="hms" title="${utc(unix)}">${utc(unix).slice(11)}</span> · ${age(unix, now)}`;
 /** A raw integer amount, short for a glance: 46.01M, 3,091.94, 12.3457, 0.0342, <0.0001. */
 export function compact(v: bigint | string | number, decimals: number): string {
   const n = Number(BigInt(v)) / 10 ** Math.max(0, decimals);
