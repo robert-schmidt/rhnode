@@ -136,9 +136,10 @@ Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_block
   sudo systemctl daemon-reload && sudo systemctl enable --now rhnode-heal.timer
   ```
 - **Backups:** `ops/rhnode-backup.timer` runs `ops/backup.sh` nightly. It dumps only what the node can't give back (tables
-  from tip traces, `ctl_*` state, small slow-to-recompute tables: ~400 MB, 40 s), keeps the newest `BACKUP_KEEP` (7),
-  and mirrors them with `rsync --delete` to `BACKUP_SSH` if set. Everything else is rebuilt from the node by the history pass.
-  Restore with `sudo sh ops/restore.sh /srv/rhnode-backups/<dump>`: it verifies the checksums, loads tables that are empty
+  from tip traces, `ctl_*` state, small slow-to-recompute tables: ~400 MB, 40 s), keeps the newest `BACKUP_KEEP`
+  here (7; 1 is enough with uploads), and uploads each one to `BACKUP_SSH` if set: there `ops/backup-recv.sh` lets that key only add files and keeps the newest 7.
+  Everything else is rebuilt from the node by the history pass.
+  Restore (pull the dump back from the backup box first) with `sudo sh ops/restore.sh /srv/rhnode-backups/<dump>`: it verifies the checksums, loads tables that are empty
   or missing, and compares row counts (`--replace` overwrites, `--db name` restores into a scratch database). On a fresh
   box, migrate first: `docker compose up -d clickhouse && docker compose run --rm ingest node src/migrate.ts`.
 - Nitro stops with a 5-minute grace period and resumes from its database. After an unclean stop it re-executes from its

@@ -1,15 +1,15 @@
 #!/bin/sh
 # Nightly (ops/rhnode-backup.timer): dump what the node can't give back, as zstd-compressed Native plus each table's
-# CREATE, keep the last BACKUP_KEEP dumps in BACKUP_DIR, and mirror them to BACKUP_SSH (user@host; port BACKUP_SSH_PORT,
-# key BACKUP_SSH_KEY) with rsync. That side should pin the key to one directory: command="rrsync <dir>",restrict in
-# authorized_keys.
+# CREATE, into BACKUP_DIR, upload it to BACKUP_SSH (user@host; port BACKUP_SSH_PORT, key BACKUP_SSH_KEY) with rsync, and
+# only then keep the newest BACKUP_KEEP dumps here (a failed upload keeps them all). The backup box keeps its own newest
+# 7: its forced command, ops/backup-recv.sh, lets the key only add files and rotates after each upload.
 # Partial on purpose (2026-10-31: a full dump was ~56 GB a night and growing ~3x with the history pass): the node is the
 # archive of every block and receipt, so kept_transfers/swaps/logs/txs/relay/blocks, idx_wallet_txs, native_edges and the
 # agg_* sums come back by re-running the history pass (~2-3 days). Dumped: what comes from tip traces (creations,
 # curve_payouts, kept_native's internal transfers), our own state (ctl_*), and small tables that are slow to recompute.
 # BACKUP_TABLES=a,b,c replaces the list; BACKUP_TABLES=all dumps every kept_/agg_/ctl_ table as before.
 # Each dump has MANIFEST (table, rows in its file) and SHA256SUMS. Restore: ops/restore.sh (checks both first).
-# Rotation: dumps are named by UTC time, the newest BACKUP_KEEP stay, and the mirror follows (rsync --delete).
+# Dumps are named by UTC time, so rotation is "all but the last N by name".
 # Tables are dumped one after another, not at one instant; ReplacingMergeTree rows may repeat until merged (FINAL reads).
 set -eu
 cd "$(dirname "$0")/.."
@@ -35,8 +35,10 @@ for t in $(q -q "SELECT name FROM system.tables WHERE database = 'rhnode' AND en
 done
 (cd "$OUT.tmp" && sha256sum -- *.zst *.sql MANIFEST > SHA256SUMS)
 mv "$OUT.tmp" "$OUT"
+log "dumped $(ls "$OUT" | grep -c native) tables, $(du -sh "$OUT" | cut -f1)"
+if [ -n "$SSH" ]; then # every local dump (one a failed night missed goes up now); -rt, not -a: no owner/mode onto that side
+  rsync -rt -e "ssh -p $PORT -i $KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new" "$DIR/" "$SSH:"
+  log "uploaded to ${SSH#*@}"
+fi
 ls -1d "$DIR"/20* | head -n -"$KEEP" | xargs -r rm -rf
-log "dumped $(ls "$OUT" | grep -c native) tables, $(du -sh "$OUT" | cut -f1); kept $(ls -1d "$DIR"/20* | wc -l) dumps, $(du -sh "$DIR" | cut -f1)"
-[ -z "$SSH" ] && exit 0
-rsync -a --delete -e "ssh -p $PORT -i $KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new" "$DIR/" "$SSH:"
-log "mirrored to ${SSH#*@}"
+log "kept $(ls -1d "$DIR"/20* | wc -l) dumps here, $(du -sh "$DIR" | cut -f1)"
