@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { html, page, units } from "./html.ts";
+import { compact, html, JS_PATH, page, units } from "./html.ts";
 import { route } from "./index.ts";
 
 const XSS = `"><script>alert(1)</script><img src=x onerror=alert(1)>`;
@@ -16,6 +16,21 @@ test("units", () => {
   assert.equal(units(1n, 18), "<0.000001");
   assert.equal(units("-1500000", 6), "-1.5");
   assert.equal(units(42n, 0), "42");
+});
+
+test("compact", () => {
+  assert.equal(compact(46007944562000000000000000n, 18), "46.01M");
+  assert.equal(compact(3091937700n, 6), "3,091.94");
+  assert.equal(compact(34200000000000000n, 18), "0.0342");
+  assert.equal(compact(5n, 18), "<0.0001");
+  assert.equal(compact(0n, 18), "0");
+});
+
+test("only the live home page loads the script, and keeps a no-script refresh", () => {
+  const p = page("x", html``, { refresh: 10, live: true });
+  assert.ok(p.includes(`<script src="${JS_PATH}" defer>`) && p.includes('<noscript><meta http-equiv="refresh" content="10"></noscript>'));
+  assert.ok(!page("x", html``, { refresh: 10 }).includes("<script"));
+  assert.equal((route("/live", new URLSearchParams()) as { key: string }).key, "/live");
 });
 
 test("route validates before anything is queried", () => {

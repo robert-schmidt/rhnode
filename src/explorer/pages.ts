@@ -2,7 +2,7 @@
 // JSON-RPC); lists, tokens, pools and prices from ClickHouse (14 days raw, kept_* and agg_* forever).
 // Every id reaching a query has passed the regexes in index.ts, and every query takes bound parameters.
 import { rows } from "../ch.ts";
-import { ago, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
+import { age, ago, compact, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
 import { bare, lookup, methods } from "./names.ts";
 import { requested } from "../watch.ts";
 import { cards, NET24 } from "../cards.ts";
@@ -11,7 +11,7 @@ import { labelsOf, type Label } from "../labels.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 export type Rpc = (method: string, params: unknown[]) => Promise<{ result?: unknown; error?: { message: string } }>;
-export type Page = { status: number; title: string; body: Html; immutable?: boolean; redirect?: string; refresh?: number };
+export type Page = { status: number; title: string; body: Html; immutable?: boolean; redirect?: string; refresh?: number; live?: boolean; fragment?: boolean };
 
 const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const ZERO = "0x" + "0".repeat(40);
@@ -99,7 +99,7 @@ async function computeStats(): Promise<Stats> {
   const tiles = m1.b && m1.t && h1.b && h1.t ? html`${tile((m1.n / m1.span).toFixed(1), "tx/s, last minute")}
 ${tile(`${((m1.span / Number(m1.b.blocks)) * 1000).toFixed(0)} ms`, "block time")}
 ${tile(gwei(m1.t.gp50), "gas price (median)")}
-${tile(ethUsd ? usd(ethUsd) : "?", "ETH, from on-chain pools")}
+${tile(ethUsd ? usd(ethUsd) : "?", "ETH price, on-chain")}
 ${tile(ethUsd ? usd(feeEth(h1.fees) * ethUsd) : `${feeEth(h1.fees).toFixed(3)} ETH`, "fees paid, last hour")}` : html``;
   return { tiles, table: html`<h2>Network <span class="muted small">(from our index; ETH ${ethUsd ? usd(ethUsd) : "?"} from on-chain pools)</span></h2>
 <div class="tw"><table class="stats-table"><tr><th></th>${cols.map((c) => html`<th>${label(c.w, c.span)}</th>`)}</tr>
@@ -117,14 +117,15 @@ ${row("Contracts created", (c) => Number(c.t!.creates).toLocaleString("en-US"))}
 </table></div>` };
 }
 
-export async function home(rpc: Rpc): Promise<Page> {
+// The latest blocks and txs, rendered once for the page and for /live (live.js feeds new rows in by data-k).
+async function latest(rpc: Rpc) {
   const head = await headBlock();
   const [blocks, txs, net] = await Promise.all([
-    rows<{ number: string; hash: string; ts: number; tx_count: number; gas_used: string }>(
-      `SELECT number, hash, toUnixTimestamp(time) AS ts, tx_count, gas_used FROM raw_blocks
+    rows<{ number: string; ts: number; tx_count: number; gas_used: string }>(
+      `SELECT number, toUnixTimestamp(time) AS ts, tx_count, gas_used FROM raw_blocks
        WHERE number > {lo:UInt64} AND sign = 1 ORDER BY number DESC LIMIT 15`, { lo: head - 200 }),
-    rows<{ hash: string; block: string; from: string; to: string; v: string; selector: string; status: number; created: string; ts: number }>(
-      `SELECT hash, block, \`from\`, \`to\`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts FROM raw_txs
+    rows<{ hash: string; from: string; to: string; v: string; selector: string; status: number; created: string; ts: number }>(
+      `SELECT hash, \`from\`, \`to\`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts FROM raw_txs
        WHERE block > {lo:UInt64} AND sign = 1 AND type != 106 ORDER BY block DESC, tx_index DESC LIMIT 15`, { lo: head - 50 }),
     stats().catch((): Stats => ({ tiles: html``, table: html`<p class="muted">Network numbers are unavailable right now.</p>` })),
   ]);
@@ -137,19 +138,43 @@ export async function home(rpc: Rpc): Promise<Page> {
   const meta = await tokens(mv.map((m) => m.token));
   const movesBy = new Map<string, Move[]>();
   for (const m of mv) movesBy.set(m.tx_hash, [...(movesBy.get(m.tx_hash) ?? []), { token: m.token, amount: BigInt(m.amt), nft: m.standard !== "erc20" }]);
-  return { status: 200, title: "Latest blocks and transactions", refresh: 10, body: html`
+  const now = Date.now() / 1000;
+  const blockRows = blocks.map((b) => html`<li data-k="${b.number}"><div>${link("block", b.number)}<span class="sub">${age(b.ts, now)}</span></div>
+<div class="num">${b.tx_count}<span class="sub">${b.tx_count === 1 ? "tx" : "txs"}</span></div><div class="num">${Number(b.gas_used).toLocaleString("en-US")}<span class="sub">gas</span></div></li>`);
+  const txRows = txs.map((t) => {
+    const m = method(t.to || null, t.created ? "" : t.selector, names);
+    return html`<li data-k="${t.hash}"${t.status ? "" : html` class="failed"`}><div class="h">${link("tx", t.hash)}<span class="sub">${/^0x[0-9a-f]{8}$/.test(m) ? html`<span class="sel" title="method not named">${m}</span>` : html`<span class="tag">${m}</span>`}${t.status ? "" : html` <span class="tag bad">failed</span>`} ${age(t.ts, now)}</span></div>
+<div class="ft">${link("address", t.from)}<span class="sub">→ ${t.created ? link("address", t.created, "new contract") : t.to ? link("address", t.to) : "—"}</span></div>
+<div class="mv">${glance(BigInt(t.v), movesBy.get(t.hash) ?? [], meta)}</div></li>`;
+  });
+  return { head, blockRows, txRows, net };
+}
+/** One line for the Moved column: ETH sent, else the first token moved, and how many more. */
+function glance(wei: bigint, ms: Move[], meta: Map<string, Token>): Html {
+  const all = [...(wei > 0n ? [html`${compact(wei, 18)} <span class="sym">ETH</span>`] : []), ...ms.map((m) => {
+    const t = meta.get(m.token);
+    return html`${m.nft ? "1 NFT" : t ? compact(m.amount, t.decimals) : compact(m.amount, 0)} ${link("address", m.token, sym(t, m.token))}`;
+  })];
+  if (!all.length) return html`<span class="muted">—</span>`;
+  return html`<span class="one">${all[0]}</span>${all.length > 1 ? html`<span class="sub">+${all.length - 1} more</span>` : ""}`;
+}
+const liveTiles = (head: number, net: Stats) => html`<div><b>${link("block", head)}</b><span>latest block</span></div>${net.tiles}`;
+
+export async function home(rpc: Rpc): Promise<Page> {
+  const { head, blockRows, txRows, net } = await latest(rpc);
+  return { status: 200, title: "Latest blocks and transactions", refresh: 10, live: true, body: html`
 <h1>Robinhood Chain</h1>
-<div class="stats"><div><b>${link("block", head)}</b><span>latest indexed block</span></div>${net.tiles}</div>
-<div class="cols"><section><h2>Latest blocks</h2><div class="tw"><table><tr><th>Block</th><th>Time (UTC)</th><th class="num">Txs</th><th class="num">Gas used</th></tr>
-${blocks.map((b) => html`<tr><td>${link("block", b.number)}</td><td>${when(b.ts)}<span class="sub">${ago(b.ts)}</span></td><td class="num">${b.tx_count}</td><td class="num">${Number(b.gas_used).toLocaleString("en-US")}</td></tr>`)}
-</table></div></section>
-<section><h2>Latest transactions</h2><div class="tw"><table><tr><th>Tx</th><th>From / To</th><th>Moved</th><th class="num">Value</th></tr>
-${txs.map((t) => html`<tr${t.status ? "" : html` class="failed"`}><td>${link("tx", t.hash)}<span class="sub"><span class="tag">${method(t.to || null, t.created ? "" : t.selector, names)}</span> ${when(t.ts)}</span></td>
-<td>${link("address", t.from)}<span class="sub">→ ${t.created ? link("address", t.created, "new contract") : t.to ? link("address", t.to) : "—"}</span></td>
-<td class="moved">${moved(movesBy.get(t.hash) ?? [], meta)}</td><td class="num">${value(t.v)}</td></tr>`)}
-</table></div></section></div>
+<div class="stats" id="tiles">${liveTiles(head, net)}</div>
+<div class="cols"><section><h2>Latest blocks <span class="live" hidden><i></i><span>Live</span></span></h2><ol class="feed blocks" id="blocks">${blockRows}</ol></section>
+<section><h2>Latest transactions</h2><ol class="feed txs" id="txs">${txRows}</ol></section></div>
 ${net.table}
-<p class="muted small">This page refreshes every 10 s. Failed transactions are dimmed.</p>` };
+<p class="muted small" id="hint">New blocks and transactions come in at the top; pointing at a list pauses it. Failed transactions are dimmed.</p>` };
+}
+
+/** /live: the same rows and tiles as a fragment, for live.js. */
+export async function live(rpc: Rpc): Promise<Page> {
+  const { head, blockRows, txRows, net } = await latest(rpc);
+  return { status: 200, title: "", fragment: true, body: html`<div id="tiles">${liveTiles(head, net)}</div><ol id="blocks">${blockRows}</ol><ol id="txs">${txRows}</ol>` };
 }
 
 // --- block ---

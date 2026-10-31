@@ -1,15 +1,15 @@
-// The explorer: server-rendered pages, no script, mounted by the API before its key check (pages are public).
+// The explorer: server-rendered pages (the home page's live feed is the one script, live.js), mounted by the API before its key check (pages are public).
 // Requests are validated by route() before anything is queried; rendered pages are cached in memory (a page of a final
 // block or tx for a day, live pages for seconds) and concurrent misses for one page share one render. Each client IP
 // gets a token bucket for cache misses only, so a cached page costs nothing; nginx limits raw request rates in front.
 import type http from "node:http";
-import { CSS, CSS_PATH, html, page, REPO, type Html } from "./html.ts";
+import { CSS, CSS_PATH, html, JS, JS_PATH, page, REPO, type Html } from "./html.ts";
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
-import { address, block, home, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
+import { address, block, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
 
 const SECURITY = {
-  "content-security-policy": "default-src 'none'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
 };
 const HASH = /^0x[0-9a-fA-F]{64}$/, ADDR = /^0x[0-9a-fA-F]{40}$/, NUM = /^\d{1,12}$/;
@@ -19,6 +19,7 @@ type Route = { key: string; ttl: number; q?: string; run: (rpc: Rpc) => Promise<
 /** PURE: the page a path asks for, with a cache key made only of validated parts; null = not ours. */
 export function route(path: string, qs: URLSearchParams): Route {
   if (path === "/") return { key: "/", ttl: 2, run: (rpc) => home(rpc) };
+  if (path === "/live") return { key: "/live", ttl: 1, run: (rpc) => live(rpc) };
   let m = path.match(/^\/block\/([^/]+)$/);
   if (m) {
     if (NUM.test(m[1])) return { key: `/block/${Number(m[1])}`, ttl: 5, run: (rpc) => block(rpc, String(Number(m![1]))) };
@@ -67,7 +68,7 @@ async function render(r: Exclude<Route, null | { redirect: string }>, rpc: Rpc):
   try {
     const p = await r.run(rpc);
     if (p.redirect) return { status: 302, body: "", redirect: p.redirect, ttl: r.ttl };
-    return { status: p.status, body: page(p.title, p.body, { q: r.q, refresh: p.refresh }), ttl: p.immutable ? IMMUTABLE_S : p.status === 200 ? r.ttl : 30 };
+    return { status: p.status, body: p.fragment ? p.body.s : page(p.title, p.body, { q: r.q, refresh: p.refresh, live: p.live }), ttl: p.immutable ? IMMUTABLE_S : p.status === 200 ? r.ttl : 30 };
   } catch (e) { // logged, never shown (it can carry SQL or an upstream URL)
     console.warn(`[explorer] ${r.key}: ${(e as Error).message}`);
     return { status: 503, body: page("Unavailable", html`<h1>Temporarily unavailable</h1><p>The node or the index did not answer. Try again in a moment.</p>`), ttl: 0 };
@@ -80,9 +81,13 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
     res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": url.pathname === CSS_PATH ? "public, max-age=31536000, immutable" : "no-cache", ...SECURITY });
     res.end(CSS); return true;
   }
+  if (url.pathname === JS_PATH) {
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=31536000, immutable", ...SECURITY });
+    res.end(JS); return true;
+  }
   if (url.pathname === "/robots.txt") {
     res.writeHead(200, { "content-type": "text/plain" });
-    res.end("User-agent: *\nDisallow: /search\nDisallow: /address/*?\nCrawl-delay: 2\n"); return true;
+    res.end("User-agent: *\nDisallow: /search\nDisallow: /live\nDisallow: /address/*?\nCrawl-delay: 2\n"); return true;
   }
   if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return true; }
   if (/^\/access(\/claim|\/token)?$/.test(url.pathname)) { await access(req, res, url); return true; }

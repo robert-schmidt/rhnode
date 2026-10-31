@@ -6,6 +6,9 @@ import { readFileSync } from "node:fs";
 /** The stylesheet, served at a content-hashed URL so a new version never meets a cached old one. */
 export const CSS = readFileSync(new URL("./style.css", import.meta.url));
 export const CSS_PATH = `/static/style.${createHash("sha256").update(CSS).digest("hex").slice(0, 10)}.css`;
+/** The home page's live feed (live.js): polls /live and feeds new rows in at the top. The only script; pages work without it. */
+export const JS = readFileSync(new URL("./live.js", import.meta.url));
+export const JS_PATH = `/static/live.${createHash("sha256").update(JS).digest("hex").slice(0, 10)}.js`;
 
 export class Html { readonly s: string; constructor(s: string) { this.s = s; } toString() { return this.s; } }
 const ESC: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -27,13 +30,14 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Html 
 
 export const REPO = "https://github.com/robert-schmidt/rhnode";
 
-export function page(title: string, body: Html, opts: { q?: string; refresh?: number } = {}): string {
+export function page(title: string, body: Html, opts: { q?: string; refresh?: number; live?: boolean } = {}): string {
+  const refresh = opts.refresh ? html`<meta http-equiv="refresh" content="${opts.refresh}">` : "";
   return html`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.refresh ? html`<meta http-equiv="refresh" content="${opts.refresh}">` : ""}
-<title>${title} · Robinhood Chain explorer</title><link rel="stylesheet" href="${CSS_PATH}">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.live ? html`<noscript>${refresh}</noscript>` : refresh}
+<title>${title} · Robinhood Chain explorer</title><link rel="stylesheet" href="${CSS_PATH}">${opts.live ? html`<script src="${JS_PATH}" defer></script>` : ""}
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
-<body><header><a class="brand" href="/">rh<span>node</span> explorer</a>
-<form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off"><button>Search</button></form></header>
+<body><header><div class="bar"><a class="brand" href="/">rh<span>node</span> explorer</a>
+<form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off" enterkeyhint="search"><button>Search</button></form></div></header>
 <main>${body}</main>
 <footer>Robinhood Chain (4663), read from our own node and ClickHouse index. Open source:
 <a href="${REPO}" rel="noopener">${REPO.replace("https://", "")}</a> · <a href="/access">access</a> · <a href="/health">status</a></footer>
@@ -69,6 +73,16 @@ export const utc = (unix: number) => new Date(unix * 1000).toISOString().replace
 /** The block time in UTC, date and time, its age on hover. */
 export const when = (unix: number, now = Date.now() / 1000) =>
   html`<time datetime="${new Date(unix * 1000).toISOString()}" title="${ago(unix, now)}">${utc(unix).slice(0, 19)}</time>`;
+/** Its age, kept current by live.js (data-ts); the UTC time on hover. */
+export const age = (unix: number, now = Date.now() / 1000) => html`<time class="age" data-ts="${unix}" datetime="${new Date(unix * 1000).toISOString()}" title="${utc(unix)}">${ago(unix, now)}</time>`;
+/** A raw integer amount, short for a glance: 46.01M, 3,091.94, 12.3457, 0.0342, <0.0001. */
+export function compact(v: bigint | string | number, decimals: number): string {
+  const n = Number(BigInt(v)) / 10 ** Math.max(0, decimals);
+  if (n >= 1e6) return n.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 2 });
+  if (n >= 1) return n.toLocaleString("en-US", { maximumFractionDigits: n >= 1000 ? 2 : 4 });
+  if (n >= 0.0001) return n.toLocaleString("en-US", { maximumSignificantDigits: 3 });
+  return n > 0 ? "<0.0001" : "0";
+}
 export const usd = (v: number) => (v >= 1 ? `$${v.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : v > 0 ? `$${v.toPrecision(4)}` : "$0");
 
 /** An inline SVG line chart (no script): points [t, v], width 100%. */
