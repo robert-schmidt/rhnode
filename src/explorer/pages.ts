@@ -361,7 +361,7 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
   const title = tok ? `${tok.name || tok.symbol || "Token"} (${tok.symbol})` : isContract ? "Contract" : "Address";
   return { status: 200, title: `${title} ${short(a)}`, refresh: cov.from && !txb && !tfb ? 60 : undefined, body: html`
 <h1>${title}</h1><p class="mono wrap">${a}</p>
-<dl><dt>Balance</dt><dd>${eth(big(bal))}</dd>
+<dl>${tok && !big(bal) ? "" : html`<dt>ETH balance</dt><dd>${eth(big(bal))}</dd>`}
 ${fund.labels.get(a) ? html`<dt>Label</dt><dd>${flag(fund.labels.get(a))}</dd>` : ""}
 <dt>Type</dt><dd>${isContract ? html`Contract${c?.kind ? html` <span class="tag">${c.kind}</span>` : ""}` : "Account (EOA)"}</dd>
 ${impl ? html`<dt>Implementation</dt><dd>${link("address", impl, impl)}</dd>` : ""}
