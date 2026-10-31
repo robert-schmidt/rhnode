@@ -42,3 +42,10 @@ INSERT INTO token_origin SELECT token, block, tx_index, log_index, tx_hash, time
 FROM (SELECT token, block, tx_index, log_index, tx_hash, time, `to`, amount FROM kept_transfers
   WHERE `from` = '0x0000000000000000000000000000000000000000' AND standard = 'erc20' AND sign = 1
   ORDER BY token, block, tx_index, log_index LIMIT 1 BY token);
+
+-- token_markets: per token a launchpad made (token_origin.minter), its curve and graduation (src/discovery.ts); version =
+-- when it was looked at (ms). final = 1: graduated, or no curve a day after its mint.
+CREATE TABLE IF NOT EXISTS token_markets (
+  token FixedString(42), minter String, curve String, grad_block UInt64, grad_tx String, pool String, venue LowCardinality(String),
+  final UInt8, version UInt64
+) ENGINE = ReplacingMergeTree(version) ORDER BY token;
