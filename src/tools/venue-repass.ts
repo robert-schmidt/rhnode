@@ -2,7 +2,7 @@
 // migration 021; Metric OMM: 023; PancakeSwap v3's event: the same deploy): go-live down to where the pass was at that deploy. Per 100K blocks one topic-filtered eth_getLogs on
 // our node (~15 s, measured 2026-10-31), the signer of each tx (the decoder's tx_from), then hist_swaps → kept_swaps
 // forever, as the pass writes them. kept_swaps replaces by (pool, block, log_index), so overlapping the pass is harmless.
-// `node src/tools/venue-repass.ts <curve|omm|pancake> <from> <to>`; exits when done.
+// `node src/tools/venue-repass.ts <curve|omm|pancake>[,…] <from> <to>`; exits when done.
 import { cfg } from "../config.ts";
 import { insert } from "../ch.ts";
 import { upstream } from "../chain/upstream.ts";
@@ -12,9 +12,10 @@ type Log = { address: string; topics: string[]; data: string; blockNumber: strin
 const up = upstream(cfg.upstreamHttp, { attempts: 4, timeoutMs: 300_000, ordered: true });
 const hex = (n: number) => "0x" + n.toString(16);
 const TOPICS = { curve: [PONS_CURVE_BUY, PONS_CURVE_SELL], omm: [SWAP_METRIC], pancake: [SWAP_PANCAKE_V3] } as const;
-const venue = process.argv[2] as keyof typeof TOPICS, topics = TOPICS[venue];
+// several at once (omm,pancake): one scan of the node
+const venue = process.argv[2] ?? "", keys = venue.split(",") as (keyof typeof TOPICS)[], topics = keys.flatMap((v) => TOPICS[v] ?? []);
 const [from, to] = [Number(process.argv[3]), Number(process.argv[4])];
-if (!topics || !(from > 0 && to >= from)) throw new Error("usage: venue-repass.ts <curve|omm|pancake> <from> <to>");
+if (!keys.every((k) => TOPICS[k]) || !(from > 0 && to >= from)) throw new Error("usage: venue-repass.ts <curve|omm|pancake> <from> <to>");
 const CHUNK = 100_000, PAR = 32;
 let swaps = 0;
 const t0 = Date.now();
@@ -35,7 +36,7 @@ for (let e = to; e >= from; e -= CHUNK) { // newest first, like the pass
       recipient: s.recipient ?? "", tx_from: signer.get(h)!, amount0: s.amount0.toString(), amount1: s.amount1.toString(),
       sqrt_price_x96: "0", liquidity: "0", tick: 0, fee: 0 }] : [];
   });
-  await insert("hist_swaps", out, `${venue}-repass:${b}-${e}`);
+  await insert("hist_swaps", out, `${venue.replace(",", "+")}-repass:${b}-${e}`);
   swaps += out.length;
   console.log(JSON.stringify({ at: new Date().toISOString(), from: b, swaps, s: Math.round((Date.now() - t0) / 1000) }));
 }
