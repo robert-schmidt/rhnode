@@ -13,12 +13,13 @@
 // - wallet_first_block: the wallet's first tx, only when it is known to be its first (nonce 0);
 // - since: max_held and the first outflow (any, and to a market) from every later transfer; sold = balance below
 //   max held, sold_out = below 10% of it;
-// - funding: the wallet's first ETH funder (native_edges), the funder's hub stats, and its links to the deployer;
+// - funding: the wallet's first ETH funder (native_edges), the funder's hub stats, its links to the deployer and its label;
 // - minutes (optional): the first N minutes after launch as a series of new buyers and net inflow into buyers.
 import { rows } from "./ch.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
 import { NATIVE_ETH, USDG, WETH } from "./chain/constants.ts";
 import type { Up } from "./cards.ts";
+import { labelsOf } from "./labels.ts";
 
 const ZERO = "0x0000000000000000000000000000000000000000";
 const MAX_WINDOW_ROWS = 50_000, MAX_LATER_ROWS = 300_000;
@@ -187,6 +188,7 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
   const hubs = funders.length ? new Map((await rows<{ src: string; edges: string; wallets: string }>(
     "SELECT src, toString(uniqMerge(n)) AS edges, toString(uniqMerge(peers)) AS wallets FROM agg_native_src WHERE src IN {s:Array(String)} GROUP BY src",
     { s: [...new Set(funders.map((f) => f.src))] })).map((h) => [h.src, h])) : new Map<string, { edges: string; wallets: string }>();
+  const flabels = await labelsOf([...new Set(funders.map((f) => f.src))]);
   const deployerFunder = deployer ? fund.get(deployer)?.src ?? null : null;
   await isContract(ws.filter((a) => !code.has(a)));
   const s = since(later, wset, markets), bal = new Map(bals.map((b) => [b.holder, BigInt(b.b)]));
@@ -228,7 +230,8 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
         first_out_block: w?.out ?? null, first_sell_block: w?.sell ?? null,
         groups: { same_tx: gTx(b), same_block: gBlock(b), same_signer: gSigner(b) },
         funding: f ? { funder: f.src, block: Number(f.block), funder_n: Number(hub?.edges ?? 0), funder_peers: Number(hub?.wallets ?? 0),
-          funder_is_deployer: !!deployer && f.src === deployer, funder_shared_with_deployer: !!deployerFunder && f.src === deployerFunder } : null,
+          funder_is_deployer: !!deployer && f.src === deployer, funder_shared_with_deployer: !!deployerFunder && f.src === deployerFunder,
+          funder_label: ((l) => (l ? { kind: l.kind, name: l.name, source: l.source } : null))(flabels.get(f.src)) } : null,
         wallet_first_block: first.get(b.wallet) ?? null, is_contract: code.get(b.wallet) ?? null,
       };
     }),
