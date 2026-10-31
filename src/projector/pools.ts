@@ -115,14 +115,15 @@ async function resolveV4(lookup: Client, p: { pool: string; manager: string }): 
   }
 }
 
-/** Resolve the pools that swapped in (from, to] and aren't known and verified (re-asked hourly otherwise). */
-export async function resolvePools(up: Client, lookup: Client, from: number, to: number): Promise<{ v23: number; v4: number; failed: number }> {
+/** Resolve the pools that swapped in (from, to] and aren't known and verified (re-asked hourly otherwise); only: just
+ *  these pools (a backfill's, src/tools/venue-backfill.ts). */
+export async function resolvePools(up: Client, lookup: Client, from: number, to: number, only?: string[]): Promise<{ v23: number; v4: number; failed: number }> {
   const unknown = (await rows<{ pool: string; vn: string; manager: string }>(
     `SELECT pool, any(venue) AS vn, any(emitter) AS manager FROM ev_swaps
      WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND venue != 'curve' -- a curve's row comes from its launch (migration 021)
-       AND pool NOT IN (SELECT pool FROM pools FINAL WHERE verified = 1 OR version > {retry:UInt64})
+       AND pool NOT IN (SELECT pool FROM pools FINAL WHERE verified = 1 OR version > {retry:UInt64}) ${only ? "AND pool IN {only:Array(String)}" : ""}
      GROUP BY pool`,
-    { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000 },
+    { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000, ...(only ? { only } : {}) },
   )).map(({ vn, ...u }) => ({ ...u, venue: vn }));
   const v23 = await resolveV23(up, unknown.filter((u) => u.venue === "v2" || u.venue === "v3"));
   const v4 = await Promise.all(unknown.filter((u) => u.venue === "v4").slice(0, V4_PER_TICK).map((u) => resolveV4(lookup, u)));

@@ -43,9 +43,10 @@ for (let b = from; b <= to; b += CHUNK) {
       amount0: s.amount0.toString(), amount1: s.amount1.toString(), sqrt_price_x96: "0", liquidity: "0", tick: 0, fee: 0 }] : [];
   });
   await insert("ev_swaps", out, `${venue}-backfill:${b}-${e}`);
-  if (venue !== "curve") await resolvePools(up, up, b - 1, e);
+  const pools = [...new Set(out.map((s) => s.pool))];
+  if (venue !== "curve" && pools.length) await resolvePools(up, up, b - 1, e, pools); // just these: every unknown v4 pool is a whole-chain getLogs
   swaps += out.length;
-  const only = v.only([...new Set(out.map((s) => s.pool))]);
+  const only = v.only(pools);
   if (out.length) { prices += await derivePrices(b - 1, e, only); trades += await deriveTrades(b - 1, e, only); }
   console.log(JSON.stringify({ to: e, swaps, prices, trades, s: Math.round((Date.now() - t0) / 1000) }));
 }
