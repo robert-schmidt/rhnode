@@ -13,6 +13,7 @@
 // stays within a few blocks of our node and our node within a few of the chain, and halves when either trails. The tip
 // and the live stream come first.
 import { ch, insert, rows } from "../ch.ts";
+import { cfg } from "../config.ts";
 import { nitro, nitroSynced, watchNitro } from "../chain/nitro.ts";
 import { decodeBlock, emptyRows, type RpcBlock, type RpcReceipt } from "../ingest/decode.ts";
 import { emptyCtx } from "../ingest/keep.ts";
@@ -41,8 +42,11 @@ export async function walkFloor(): Promise<number | null> {
 /** Blocks ingest trails our node by (null: the node isn't synced or known). */
 async function ingestLag(): Promise<number | null> {
   if (!nitroSynced() || nitro.head == null) return null;
-  const [t] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'tip'");
-  return nitro.head - Number(t?.block ?? 0);
+  // With tip traces the tracer counts as ingest: it lost three 1,000-block windows on 2026-10-31 while the pass ran at
+  // 32 in flight and ingest itself kept up, so the pass backs off when either trails.
+  const [t] = await rows<{ b: string }>("SELECT min(block) AS b FROM ctl_cursors FINAL WHERE name IN {n:Array(String)}",
+    { n: cfg.traces === "tip" ? ["tip", "trace"] : ["tip"] });
+  return nitro.head - Number(t?.b ?? 0);
 }
 
 /** PURE: the next concurrency. +1 while ingest is within 5 blocks of our node and our node within 5 of the chain, halved
