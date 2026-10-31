@@ -1,9 +1,9 @@
-// The home page's live feed: polls /live (server-rendered rows, cached 1 s for everyone) and feeds rows it hasn't shown
-// in at the top, spread over the poll interval so the list moves like the chain does. Pointing at a list (or focusing
+// The home page's live feed: polls /live (server-rendered rows, cached 1 s for everyone) and feeds rows newer than the
+// ones it shows (data-o: block, or block and tx index) in at the top, spread over the poll interval so the list moves like the chain does. Pointing at a list (or focusing
 // into it) pauses it; a hidden tab doesn't poll. Without this script the page refreshes itself (<noscript>).
 "use strict";
 (() => {
-  const POLL = 2000, KEEP = 15;
+  const POLL = 1500, KEEP = 15; // /live carries ~4 s of blocks, so a poll never skips one
   const lists = ["blocks", "txs"].map((id) => ({ el: document.getElementById(id), queue: [], held: false }));
   const tiles = document.getElementById("tiles"), badge = document.querySelector(".live"), label = badge && badge.querySelector("span");
   if (!lists.every((l) => l.el) || !tiles) return;
@@ -56,10 +56,11 @@
       for (const l of lists) {
         const got = doc.getElementById(l.el.id);
         if (!got) throw new Error("no rows");
-        const seen = new Set([...l.el.children, ...l.queue].map((c) => c.dataset.k));
-        const fresh = [...got.children].filter((c) => !seen.has(c.dataset.k)).reverse().map((c) => document.importNode(c, true));
+        const last = l.queue.at(-1) ?? l.el.firstElementChild, top = last ? Number(last.dataset.o) : 0;
+        const fresh = [...got.children].filter((c) => Number(c.dataset.o) > top).reverse().map((c) => document.importNode(c, true));
         l.queue.push(...fresh);
-        if (l.queue.length > KEEP) l.queue.splice(0, l.queue.length - KEEP); // older ones would scroll off anyway
+        const cap = l.held ? KEEP : 40; // paused: older ones would scroll off anyway
+        if (l.queue.length > cap) l.queue.splice(0, l.queue.length - cap);
       }
       wait = POLL;
       if (!lists.some((x) => x.held)) state("live");
