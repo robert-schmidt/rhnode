@@ -9,7 +9,8 @@
 //   meets: a one-sided pool has a large liquidity_usd and almost none of it); v3 also liquidity_balances_usd (all it holds);
 // - top10 and circulating leave out protocol addresses (chain/protocol.ts), the token's own pools and hooks, its launchpad curve and
 //   the token contract; lockers are locked_supply, 0xdead burned_supply; pools count as circulating;
-// - 24 h buys/sells/buyers/sellers by the trader (ev_trades), volume (net and raw) from priced swaps; top_wallet is the
+// - h24/h6/h1 buys/sells/buyers/sellers by the trader (ev_trades), volume (net and raw) from priced swaps; price_change_pct
+//   the main pool's price now against its last 1-minute close 1/6/24 h ago (null with no trade before); top_wallet is the
 //   trader with the most 24 h trade USD and its share (wash across many txs by one wallet shows as a share near 1);
 // - anything not known is null, never 0 (a token whose history isn't complete has null holder fields).
 import { parseAbi } from "viem";
@@ -33,7 +34,10 @@ const V3 = parseAbi(["function slot0() view returns (uint160, int24)", "function
 const SV = parseAbi(["function getSlot0(bytes32) view returns (uint160, int24)", "function getLiquidity(bytes32) view returns (uint128)",
   "function getTickBitmap(bytes32, int16) view returns (uint256)", "function getTickLiquidity(bytes32, int24) view returns (uint128, int128)"]);
 // per token and pool, 24 h of priced swaps: net (each tx's buys and sells in the pool cancel) and raw USD
-export const NET24 = `SELECT token, pool, any(qt) AS q, sum(abs(nt)) AS nv, sum(gr) AS rv FROM (SELECT token, pool, tx_hash, any(quote) AS qt,
+export const NET24 = `SELECT token, pool, any(qt) AS q, sum(abs(nt)) AS nv, sum(gr) AS rv,
+    sumIf(abs(nt), tm >= now() - INTERVAL 6 HOUR) AS nv6, sumIf(gr, tm >= now() - INTERVAL 6 HOUR) AS rv6,
+    sumIf(abs(nt), tm >= now() - INTERVAL 1 HOUR) AS nv1, sumIf(gr, tm >= now() - INTERVAL 1 HOUR) AS rv1
+  FROM (SELECT token, pool, tx_hash, any(quote) AS qt, min(time) AS tm,
     sum(if(quote_delta > 0, usd, -usd) * sign) AS nt, sum(usd * sign) AS gr FROM ev_prices
     WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, pool, tx_hash) GROUP BY token, pool`;
 const BAND = 92_103, MAX_TICK = 887_272; // ln(10,000) / ln(1.0001) ticks each side
@@ -89,6 +93,8 @@ export function band(sqrtX96: bigint, tick: number, L: bigint, net: Map<number, 
   return [a0, a1];
 }
 
+const WINDOWS = [["24", "INTERVAL 1 DAY"], ["6", "INTERVAL 6 HOUR"], ["1", "INTERVAL 1 HOUR"]] as const;
+
 // pool → its initialized ticks' liquidityNet over [lo, hi] as read at `at` around `tick` (see build)
 const ticks = new Map<string, { at: number; tick: number; lo: number; hi: number; net: Map<number, bigint> }>();
 
@@ -112,11 +118,12 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
        LEFT JOIN (${NET24}) AS n ON n.token = c.token AND n.pool = c.pool
        INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL WHERE ok = 1) AS p ON p.pool = c.pool
        ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token`, { t }),
-    rows<{ token: string; buys: string; sells: string; buyers: string; sellers: string }>(
-      `SELECT token, sumIf(sign, side = 'buy') AS buys, sumIf(sign, side = 'sell') AS sells,
-         uniqExactIf(wallet, side = 'buy' AND sign = 1) AS buyers, uniqExactIf(wallet, side = 'sell' AND sign = 1) AS sellers
+    rows<{ token: string } & Record<string, string>>(
+      `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
+         uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
        FROM ev_trades WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token`, { t }),
-    rows<{ token: string; v: number; raw: number }>(`SELECT token, round(sum(nv), 2) AS v, round(sum(rv), 2) AS raw FROM (${NET24}) GROUP BY token`, { t }),
+    rows<{ token: string } & Record<string, number>>(`SELECT token, round(sum(nv), 2) AS v24, round(sum(rv), 2) AS raw24, round(sum(nv6), 2) AS v6,
+      round(sum(rv6), 2) AS raw6, round(sum(nv1), 2) AS v1, round(sum(rv1), 2) AS raw1 FROM (${NET24}) GROUP BY token`, { t }),
     eth(),
     rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'tip'"),
     rows<{ token: string; wallet: string; share: number }>(
@@ -156,7 +163,12 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       { target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
     else calls.push({ target: V4_STATE_VIEW, abi: SV, fn: "getSlot0", args: [p.pool] }, { target: V4_STATE_VIEW, abi: SV, fn: "getLiquidity", args: [p.pool] });
   }
-  const res = await mc(up, calls);
+  const [res, ago] = await Promise.all([mc(up, calls), P.size ? rows<{ token: string; pool: string; p1: number; p6: number; p24: number }>(
+    `SELECT token, pool, argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 HOUR) AS p1, argMaxMergeIf(close_usd, minute < now() - INTERVAL 6 HOUR) AS p6,
+       argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 DAY) AS p24 FROM agg_candles_1m
+     WHERE token IN {t:Array(String)} AND pool IN {p:Array(String)} AND minute >= now() - INTERVAL 14 DAY GROUP BY token, pool`,
+    { t: [...P.keys()], p: [...P.values()].map((p) => p.pool) }) : []]);
+  const AGO = new Map(ago.filter((r) => P.get(r.token)?.pool === r.pool).map((r) => [r.token, r]));
   const at = (tk: string, k: number) => (res[slots.get(tk)! + k] ?? undefined) as (readonly bigint[] & bigint) | undefined;
 
   // v3/v4: the tick bitmap words around the price, then the liquidityNet of every initialized tick found in the band.
@@ -231,8 +243,16 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       top10: complete ? { amount: (top10 ? BigInt(top10.top) : 0n).toString(), pct: pct(top10 ? BigInt(top10.top) : 0n, supply) } : null,
       creator: lc?.deployer || null, launchpad: lc?.source ?? null, launch_block: lc ? Number(lc.block) : null, launch_time: lc?.time ?? null,
       main_pool: main,
-      h24: { volume_usd: V.get(tk)?.v ?? 0, volume_raw_usd: V.get(tk)?.raw ?? 0, buys: Number(tr?.buys ?? 0), sells: Number(tr?.sells ?? 0), buyers: Number(tr?.buyers ?? 0), sellers: Number(tr?.sellers ?? 0),
-        top_wallet: W.get(tk) ? { wallet: W.get(tk)!.wallet, share: Math.round(W.get(tk)!.share * 10_000) / 10_000 } : null },
+      ...Object.fromEntries(WINDOWS.map(([h]) => [`h${h}`, {
+        volume_usd: V.get(tk)?.[`v${h}`] ?? 0, volume_raw_usd: V.get(tk)?.[`raw${h}`] ?? 0, buys: Number(tr?.[`buys${h}`] ?? 0), sells: Number(tr?.[`sells${h}`] ?? 0),
+        buyers: Number(tr?.[`buyers${h}`] ?? 0), sellers: Number(tr?.[`sellers${h}`] ?? 0),
+        ...(h === "24" ? { top_wallet: W.get(tk) ? { wallet: W.get(tk)!.wallet, share: Math.round(W.get(tk)!.share * 10_000) / 10_000 } : null } : {}),
+      }])),
+      // the main pool's price at the tip against its last 1-minute close before then; null with no trade before then
+      price_change_pct: Object.fromEntries((["1", "6", "24"] as const).map((h) => {
+        const was = AGO.get(tk)?.[`p${h}`], now = (main?.price_usd as number | null) ?? null;
+        return [`h${h}`, was && now != null ? Math.round((now / was - 1) * 1e6) / 1e4 : null];
+      })),
       block: ingested,
     });
   }
