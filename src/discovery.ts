@@ -16,7 +16,9 @@
 // - curve_payouts (migration 025): native ETH out of a curve from tip traces, LAG blocks behind them (a new token's
 //   curve is found within the hour of its first trades, so its payouts are scanned after it is known); ERC-20 quotes
 //   out of a curve from kept_transfers, recomputed hourly (it reaches back with the history pass).
-// Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass.
+// Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass: while the pass
+// runs, it rests DISCOVERY_REST times as long as a round took (each token read touches a granule in every kept_transfers
+// part, ~260K rows whatever its size: measured 2026-10-31, unthrottled it cut the pass from ~800 to ~250 inserts per 5 min).
 import { keccak256 } from "viem";
 import { ch, insert, rows } from "./ch.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
@@ -26,6 +28,7 @@ import { deduceMarkets, type Tf } from "./early.ts";
 import type { Up } from "./cards.ts";
 
 const PAR = Number(process.env.DISCOVERY_PAR ?? 8);
+const REST = Number(process.env.DISCOVERY_REST ?? 4);
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"; // EIP-1967 implementation
 const BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"; // EIP-1967 beacon
 const IMPLEMENTATION = "0x5c60da1b"; // implementation()
@@ -241,8 +244,9 @@ async function payouts(): Promise<number> {
 export async function discoveryWorker(up: Up): Promise<never> {
   for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
-      const n = await creations(up) + await origins(up) + await markets(up) + await payouts();
-      wait = n ? 1_000 : 60_000;
+      const t0 = Date.now(), n = await creations(up) + await origins(up) + await markets(up) + await payouts();
+      const [w] = await rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'walk'");
+      wait = !n ? 60_000 : Number(w?.b ?? 0) > 0 ? Math.max(1_000, REST * (Date.now() - t0)) : 1_000;
     } catch (e) { console.error("discovery:", (e as Error).message); wait = 60_000; } // ingest may not have migrated yet
   }
 }
