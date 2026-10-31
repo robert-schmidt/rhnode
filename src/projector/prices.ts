@@ -46,20 +46,30 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
 
 let ethUsd: number | null = null;
 
-/** Price every swap in (from, to] whose pool is resolved; returns rows written. */
-export async function derivePrices(from: number, to: number): Promise<number> {
+/** Price every swap in (from, to] whose pool is resolved; returns rows written. curveOnly (src/tools/curve-backfill.ts):
+ *  only curve swaps, priced at the ETH/USD the range already holds (its other swaps are priced already). */
+export async function derivePrices(from: number, to: number, curveOnly = false): Promise<number> {
+  const only = curveOnly ? "AND venue = 'curve'" : "";
+  if (curveOnly) {
+    const [r] = await rows<{ p: number }>("SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND block > {from:UInt64} - 20000 AND eth_usd > 0 ORDER BY block DESC LIMIT 1", { from, to });
+    return priceRange(from, to, only, Number(r?.p ?? 0) || null);
+  }
   if (ethUsd === null) {
     ethUsd = Number((await rows<{ p: number }>(
       `SELECT price AS p FROM ev_prices WHERE token IN ({w:String}, {n:String}) AND quote = {u:String} AND verified = 1 ORDER BY block DESC, log_index DESC LIMIT 1`,
       { w: WETH, n: NATIVE_ETH, u: USDG },
     ))[0]?.p ?? 0) || null;
   }
+  return priceRange(from, to, "", null);
+}
+
+async function priceRange(from: number, to: number, only: string, fixedEthUsd: number | null): Promise<number> {
   const swaps = await rows<Swap & { block: string; tx_index: number; log_index: number; tx_hash: string; time: string; pool: string; tx_from: string; verified: number }>(
     `SELECT s.block, s.tx_index, s.log_index, s.tx_hash, s.time, s.venue, s.pool, toString(s.amount0) AS a0, toString(s.amount1) AS a1,
        toString(s.sqrt_price_x96) AS sqrt, s.tx_from, p.token0, p.token1, p.verified
      FROM ev_swaps AS s INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE ok = 1
-       AND pool IN (SELECT pool FROM ev_swaps WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})) AS p USING pool
-     WHERE s.block > {from:UInt64} AND s.block <= {to:UInt64} AND ${inSpan("s.time")} AND s.sign = 1 ORDER BY s.block, s.log_index`,
+       AND pool IN (SELECT pool FROM ev_swaps WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only})) AS p USING pool
+     WHERE s.block > {from:UInt64} AND s.block <= {to:UInt64} AND ${inSpan("s.time")} AND s.sign = 1 ${only.replace("venue", "s.venue")} ORDER BY s.block, s.log_index`,
     { from, to, ...await span(from, to) },
   );
   const tokens = [...new Set(swaps.flatMap((s) => [s.token0, s.token1]))].filter((t) => !(t in QUOTE_DECIMALS));
@@ -72,7 +82,8 @@ export async function derivePrices(from: number, to: number): Promise<number> {
   const ethPrices = swaps.filter((s) => s.verified)
     .map((s) => priceSwap(s, decimals.get(sides(s.token0, s.token1)?.token ?? ""), 1))
     .filter((p) => p && isEth(p.token) && p.quote === USDG && p.quoteAmount >= 100).map((p) => p!.price).sort((a, b) => a - b);
-  if (ethPrices.length) ethUsd = ethPrices[Math.floor(ethPrices.length / 2)];
+  if (fixedEthUsd != null) ethUsd = fixedEthUsd; // ponytail: the backfill sets the module's ETH/USD; the live projector's next range resets it
+  else if (ethPrices.length) ethUsd = ethPrices[Math.floor(ethPrices.length / 2)];
 
   const out = [];
   for (const s of swaps) {
@@ -85,6 +96,6 @@ export async function derivePrices(from: number, to: number): Promise<number> {
       tx_from: s.tx_from, verified: s.verified, sign: 1,
     });
   }
-  await insert("ev_prices", out, `prices:${from}-${to}`);
+  await insert("ev_prices", out, `${only ? "curve-" : ""}prices:${from}-${to}`);
   return out.length;
 }

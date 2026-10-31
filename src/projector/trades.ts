@@ -47,12 +47,14 @@ export function tradesOfTx(signer: string, transfers: Transfer[], prices: Price[
   return out;
 }
 
-/** Trades for every tx in (from, to] with a priced swap, plus Relay fills. */
-export async function deriveTrades(from: number, to: number): Promise<number> {
+/** Trades for every tx in (from, to] with a priced swap, plus Relay fills. curveOnly (src/tools/curve-backfill.ts): only
+ *  txs with a curve price and no trade yet, no Relay fills. */
+export async function deriveTrades(from: number, to: number, curveOnly = false): Promise<number> {
   const r = { from, to, ...await span(from, to) };
+  const only = curveOnly ? `AND venue = 'curve') AND hash NOT IN (SELECT tx_hash FROM ev_trades WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}` : "";
   const txs = await rows<{ block: string; tx_index: number; tx_hash: string; time: string; signer: string; keep: number }>(
     `SELECT block, tx_index, hash AS tx_hash, time, \`from\` AS signer, keep FROM raw_txs
-     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})`, r);
+     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only})`, r);
   const byTx = <T extends { tx_hash: string }>(xs: T[]) => {
     const m = new Map<string, T[]>();
     for (const x of xs) (m.get(x.tx_hash) ?? m.set(x.tx_hash, []).get(x.tx_hash)!).push(x);
@@ -74,6 +76,7 @@ export async function deriveTrades(from: number, to: number): Promise<number> {
         side: t.amount > 0n ? "buy" : "sell", amount: t.amount.toString(), usd: t.usd, eth: t.eth, via: t.via, keep: tx.keep, sign: 1 });
     }
   }
+  if (curveOnly) { await insert("ev_trades", out, `curve-trades:${from}-${to}`); return out.length; }
   // Relay fills: the recipient bought, paid in USDG and/or WETH on the solver's side.
   // The last day first (a day partition or two instead of all of raw), then everything.
   const lastEthUsd = (bound: string) => rows<{ p: number }>(`SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND eth_usd > 0 ${bound} ORDER BY block DESC LIMIT 1`, r);
