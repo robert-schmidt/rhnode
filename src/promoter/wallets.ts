@@ -2,6 +2,7 @@
 // more than WALLET_MAX_TXS_DAY txs a day over raw_txs). Kept means: watched from now on (ctl_watchlists 'requested',
 // so ingest keeps its txs, logs and trades forever), and its txs still in raw_txs copied into kept_txs (its trades into
 // kept_trades), so kept_txs holds every tx from/to/created by it from `floor` (the oldest raw block) on.
+// (A sign -1 trade with keep 0 is a duplicate's correction, src/tools/dedupe-trades.ts: it never reaches kept_trades.)
 // Its ERC-20 transfers need nothing: kept_transfers holds all of them. Logs and receipts of older txs come from the node.
 // ponytail: history below the oldest raw block needs full blocks from our node; add that scan once Nitro is synced.
 import { ch, rows } from "../ch.ts";
@@ -33,7 +34,7 @@ export async function indexWallets(ws: string[]): Promise<State[]> {
     await sleep(RELOAD_MS); // from here on ingest keeps them; the copy below covers everything older (kept_* dedupes the overlap)
     for (const { wallet } of keep) {
       await ch.command({ query: `INSERT INTO kept_txs SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM raw_txs WHERE ${TOUCH}`, query_params: { w: wallet } });
-      await ch.command({ query: `INSERT INTO kept_trades SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM ev_trades WHERE wallet = {w:String}`, query_params: { w: wallet } });
+      await ch.command({ query: `INSERT INTO kept_trades SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM ev_trades WHERE wallet = {w:String} AND NOT (sign = -1 AND keep = 0)`, query_params: { w: wallet } });
     }
   }
   await save(out);
