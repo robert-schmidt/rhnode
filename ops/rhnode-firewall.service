@@ -1,6 +1,7 @@
 [Unit]
 Description=rhnode: only the API box reaches the node's published ports (ops/firewall.sh)
-After=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
 Requires=docker.service
 PartOf=docker.service
 
