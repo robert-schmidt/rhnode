@@ -9,7 +9,8 @@
 //   meets: a one-sided pool has a large liquidity_usd and almost none of it); v3 also liquidity_balances_usd (all it holds);
 // - top10 and circulating leave out protocol addresses (chain/protocol.ts), the token's own pools and hooks, its launchpad curve and
 //   the token contract; lockers are locked_supply, 0xdead burned_supply; pools count as circulating;
-// - 24 h buys/sells/buyers/sellers by the trader (ev_trades), volume (net and raw) from priced swaps;
+// - 24 h buys/sells/buyers/sellers by the trader (ev_trades), volume (net and raw) from priced swaps; top_wallet is the
+//   trader with the most 24 h trade USD and its share (wash across many txs by one wallet shows as a share near 1);
 // - anything not known is null, never 0 (a token whose history isn't complete has null holder fields).
 import { parseAbi } from "viem";
 import { rows } from "./ch.ts";
@@ -94,7 +95,7 @@ const mc = (up: Up, cs: Call[]) => Promise.all(Array.from({ length: Math.ceil(cs
 
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const t = tokens;
-  const [meta, launches, cands, ownPools, trades, vols, eu, [tip]] = await Promise.all([
+  const [meta, launches, cands, ownPools, trades, vols, eu, [tip], tops] = await Promise.all([
     rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
       "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t }),
     rows<{ token: string; deployer: string; source: string; block: string; time: number; detail: string }>(
@@ -116,10 +117,13 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     rows<{ token: string; v: number; raw: number }>(`SELECT token, round(sum(nv), 2) AS v, round(sum(rv), 2) AS raw FROM (${NET24}) GROUP BY token`, { t }),
     eth(),
     rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'tip'"),
+    rows<{ token: string; wallet: string; share: number }>(
+      `SELECT token, argMax(wallet, w) AS wallet, max(w) / sum(w) AS share FROM (SELECT token, wallet, sum(usd * sign) AS w FROM ev_trades
+       WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, wallet) GROUP BY token HAVING sum(w) > 0`, { t }),
   ]);
   const ingested = Number(tip?.b ?? 0);
   const by = <T extends { token: string }>(xs: T[]) => new Map(xs.map((x) => [x.token, x]));
-  const M = by(meta), L = by(launches), P = by(cands), T = by(trades), V = by(vols);
+  const M = by(meta), L = by(launches), P = by(cands), T = by(trades), V = by(vols), W = by(tops);
   const curve = (tk: string) => { try { const c = JSON.parse(L.get(tk)?.detail ?? "{}").curve; return typeof c === "string" && ADDR.test(c.toLowerCase()) ? c.toLowerCase() : null; } catch { return null; } };
   const curves = t.map(curve).filter((c): c is string => !!c);
 
@@ -211,7 +215,8 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       top10: complete ? { amount: (top10 ? BigInt(top10.top) : 0n).toString(), pct: pct(top10 ? BigInt(top10.top) : 0n, supply) } : null,
       creator: lc?.deployer || null, launchpad: lc?.source ?? null, launch_block: lc ? Number(lc.block) : null, launch_time: lc?.time ?? null,
       main_pool: main,
-      h24: { volume_usd: V.get(tk)?.v ?? 0, volume_raw_usd: V.get(tk)?.raw ?? 0, buys: Number(tr?.buys ?? 0), sells: Number(tr?.sells ?? 0), buyers: Number(tr?.buyers ?? 0), sellers: Number(tr?.sellers ?? 0) },
+      h24: { volume_usd: V.get(tk)?.v ?? 0, volume_raw_usd: V.get(tk)?.raw ?? 0, buys: Number(tr?.buys ?? 0), sells: Number(tr?.sells ?? 0), buyers: Number(tr?.buyers ?? 0), sellers: Number(tr?.sellers ?? 0),
+        top_wallet: W.get(tk) ? { wallet: W.get(tk)!.wallet, share: Math.round(W.get(tk)!.share * 10_000) / 10_000 } : null },
       block: ingested,
     });
   }

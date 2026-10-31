@@ -369,7 +369,7 @@ type View = {
   top10: { pct: number | null } | null; creator: string | null; launchpad: string | null; launch_block: number | null;
   main_pool: { pool: string; venue: string; quote: string; verified: boolean; created_block: number | null; price_usd: number | null;
     liquidity_usd: number | null; liquidity_quote_usd: number | null } | null;
-  h24: { volume_usd: number; volume_raw_usd: number; buys: number; sells: number; buyers: number; sellers: number };
+  h24: { volume_usd: number; volume_raw_usd: number; buys: number; sells: number; buyers: number; sellers: number; top_wallet: { wallet: string; share: number } | null };
 };
 const upOf = (rpc: Rpc) => ({ call: <T>(m: string, p: unknown[]) => call<T>(rpc, m, p) });
 const money = (v: number | null | undefined) => (v == null ? "—" : usd(v));
@@ -399,16 +399,18 @@ async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
   const quote = (q: string) => (QUOTES[q] ? link("address", q, QUOTES[q]) : link("address", q));
   const oneSided = mp?.liquidity_usd != null && mp.liquidity_quote_usd != null && mp.liquidity_usd > 1_000 && mp.liquidity_quote_usd < 0.05 * mp.liquidity_usd;
   const wash = d ? washy(d.volume_usd, d.volume_raw_usd) : false;
+  const one = d?.top_wallet && d.top_wallet.share >= 0.5 && d.volume_usd > 10_000 ? d.top_wallet : null; // one wallet makes the market
   const what = (a: string) => { const e = PROTOCOL.get(a); return e ? html`<span class="tag">${e.label}</span>` : ownSet.has(a) ? html`<span class="tag">pool</span>` : a === t ? html`<span class="tag">token contract</span>` : ""; };
   const tile = (v: unknown, k: unknown) => html`<div><b>${v}</b><span>${k}</span></div>`;
   return html`<h2>Token</h2>
 <div class="stats">${tile(money(mp?.price_usd), "price, main pool")}
 ${tile(money(mp?.liquidity_quote_usd), html`sell-side liquidity${oneSided ? html` <span class="bad">one-sided</span>` : ""}`)}
-${tile(money(d?.volume_usd), html`24 h volume${wash ? html` <span class="bad">wash: ${usd(d!.volume_raw_usd)} gross</span>` : ""}`)}
+${tile(money(d?.volume_usd), html`24 h volume${wash ? html` <span class="bad">wash: ${usd(d!.volume_raw_usd)} gross</span>` : one ? html` <span class="bad">${Math.round(one.share * 100)}% one wallet</span>` : ""}`)}
 ${tile(Number(tok.holder_count).toLocaleString("en-US"), card?.complete ? "holders" : "holders (since our history)")}
 ${card?.top10?.pct != null ? tile(`${card.top10.pct.toFixed(2)}%`, "held by the top 10") : ""}</div>
-${oneSided || wash ? html`<p class="note small">${oneSided ? html`<b>One-sided pool:</b> it holds ${usd(mp!.liquidity_usd!)} in all, but only ${usd(mp!.liquidity_quote_usd!)} of it is ${QUOTES[mp!.quote] ?? "the quote asset"}, which is what a seller receives. ` : ""}${wash
-  ? html`<b>Wash trading:</b> ${usd(d!.volume_raw_usd)} of swaps in 24 h, but buys and sells inside the same transactions cancel out to ${usd(d!.volume_usd)}.` : ""}</p>` : ""}
+${oneSided || wash || one ? html`<p class="note small">${oneSided ? html`<b>One-sided pool:</b> it holds ${usd(mp!.liquidity_usd!)} in all, but only ${usd(mp!.liquidity_quote_usd!)} of it is ${QUOTES[mp!.quote] ?? "the quote asset"}, which is what a seller receives. ` : ""}${wash
+  ? html`<b>Wash trading:</b> ${usd(d!.volume_raw_usd)} of swaps in 24 h, but buys and sells inside the same transactions cancel out to ${usd(d!.volume_usd)}. ` : ""}${one
+  ? html`<b>One wallet:</b> ${link("address", one.wallet)} made ${(one.share * 100).toFixed(1)}% of the 24 h trading.` : ""}</p>` : ""}
 <dl><dt>Name</dt><dd>${tok.name}</dd><dt>Symbol</dt><dd>${tok.symbol}</dd><dt>Decimals</dt><dd>${tok.decimals}</dd>
 <dt>Total supply</dt><dd>${units(supply, tok.decimals, 2)}</dd>
 ${card?.complete ? html`<dt>Circulating</dt><dd>${amt(card.circulating_supply)} <span class="muted small">(locked ${amt(card.locked_supply)}, burned ${amt(card.burned_supply)})</span></dd>`
@@ -416,7 +418,8 @@ ${card?.complete ? html`<dt>Circulating</dt><dd>${amt(card.circulating_supply)} 
 ${card?.launch_block ? html`<dt>Launched</dt><dd>${card.launchpad ? html`<span class="tag">${card.launchpad}</span> ` : ""}in block ${link("block", card.launch_block)}${card.creator ? html` by ${link("address", card.creator)}` : ""}</dd>` : ""}
 ${mp ? html`<dt>Main pool</dt><dd><span class="mono">${short(mp.pool)}</span> <span class="tag">${mp.venue}</span> against ${quote(mp.quote)}${mp.verified ? "" : html` <span class="bad small">unverified</span>`}
 <span class="muted small">liquidity ${money(mp.liquidity_usd)} in all, ${money(mp.liquidity_quote_usd)} on the sell side</span></dd>` : ""}
-${d ? html`<dt>Trades, 24 h</dt><dd>${d.buys.toLocaleString("en-US")} buys by ${d.buyers.toLocaleString("en-US")} wallets, ${d.sells.toLocaleString("en-US")} sells by ${d.sellers.toLocaleString("en-US")}</dd>` : ""}</dl>
+${d ? html`<dt>Trades, 24 h</dt><dd>${d.buys.toLocaleString("en-US")} buys by ${d.buyers.toLocaleString("en-US")} wallets, ${d.sells.toLocaleString("en-US")} sells by ${d.sellers.toLocaleString("en-US")}${d.top_wallet
+  ? html` <span class="muted small">(largest trader ${link("address", d.top_wallet.wallet)}: ${(d.top_wallet.share * 100).toFixed(1)}%)</span>` : ""}</dd>` : ""}</dl>
 ${chart.length ? html`<h3>Price, last 7 days <span class="muted small">(hourly close, pool ${short(chartPool!)})</span></h3>${sparkline(chart.map((r) => [r.h, r.c]))}` : ""}
 ${pools.length ? html`<h3>Pools (24 h)</h3><div class="tw"><table><tr><th>Pool</th><th>Venue</th><th>Quote</th><th class="num">Volume</th><th class="num">Gross</th><th></th></tr>
 ${pools.map((p) => html`<tr><td class="mono">${short(p.pl)}</td><td>${p.v}</td><td>${quote(p.q)}</td><td class="num">${usd(p.vol)}</td><td class="num muted">${usd(p.raw)}</td>
