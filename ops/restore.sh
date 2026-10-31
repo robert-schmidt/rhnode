@@ -4,7 +4,7 @@
 #   sudo sh ops/restore.sh --replace <dump-dir> [table ...] TRUNCATE each table first (agg_* states would double otherwise)
 #   sudo sh ops/restore.sh --db rhnode_check <dump-dir>     into a scratch database (created; drop it after)
 # A dump comes from the backup box's mirror or BACKUP_DIR. It checks SHA256SUMS before touching anything, creates a missing
-# table from the dump's CREATE, and compares each table's rows with the dump's MANIFEST. Tables not in the dump come back by re-running the history pass.
+# table from the dump's CREATE, and checks that each table got every row of its file (MANIFEST). Tables not in the dump come back by re-running the history pass.
 # A fresh box: migrate first (views and the other tables come from migrations), restore, then start the rest:
 #   docker compose up -d clickhouse && docker compose run --rm ingest node src/migrate.ts
 #   sudo sh ops/restore.sh <dump-dir> && docker compose up -d
@@ -24,8 +24,12 @@ for t in $TABLES; do
   if [ "$(q -q "EXISTS TABLE $DB.$t")" = 0 ]; then sed "s/^CREATE TABLE rhnode\./CREATE TABLE $DB./" "$D/$t.sql" | q --multiquery
   elif [ "$REPLACE" = 1 ]; then q -q "TRUNCATE TABLE $DB.$t"
   elif [ "$(q -q "SELECT count() FROM $DB.$t")" != 0 ]; then echo "$t: has rows, skipped (--replace to overwrite)"; bad=1; continue; fi
-  zstd -dc "$D/$t.native.zst" | q -q "INSERT INTO $DB.$t FORMAT Native"
-  want=$(awk -v t="$t" '$1 == t { print $2 }' "$D/MANIFEST"); got=$(q -q "SELECT count() FROM $DB.$t")
-  echo "$t: $got rows (dump: ${want:-?})"
+  # rows written vs rows in the file (count() wouldn't do: Replacing/Aggregating tables collapse duplicates as they merge)
+  id=restore_${t}_$$
+  zstd -dc "$D/$t.native.zst" | q --query_id "$id" --optimize_on_insert 0 -q "INSERT INTO $DB.$t FORMAT Native"
+  q -q "SYSTEM FLUSH LOGS"
+  got=$(q -q "SELECT written_rows FROM system.query_log WHERE query_id = '$id' AND type = 'QueryFinish' LIMIT 1")
+  want=$(awk -v t="$t" '$1 == t { print $2 }' "$D/MANIFEST")
+  if [ "$got" = "$want" ]; then echo "$t: $got rows"; else echo "$t: wrote ${got:-?} rows, the dump has ${want:-?}"; bad=1; fi
 done
 exit $bad
