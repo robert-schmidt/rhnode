@@ -13,13 +13,18 @@ async function headOf(url: string): Promise<number> {
 }
 
 async function probe() {
-  try {
-    const [n, ref] = await Promise.all([headOf(nitro.url), headOf(PUBLIC_RPC)]);
-    nitro.head = n; nitro.behind = Math.max(0, ref - n);
-  } catch { nitro.head = nitro.behind = null; }
+  const [n, ref] = await Promise.allSettled([headOf(nitro.url), headOf(PUBLIC_RPC)]);
+  if (n.status === "rejected") nitro.head = nitro.behind = null;
+  else {
+    nitro.head = n.value;
+    // The reference failing says nothing about our node: keep the last verdict, so one slow public probe doesn't
+    // reset `since` (clients gate on it staying unbroken). A stuck node shows on the next answered probe.
+    if (ref.status === "fulfilled") nitro.behind = Math.max(0, ref.value - n.value);
+    else if (nitro.behind == null) return;
+  }
   const synced = nitro.behind != null && nitro.behind <= SYNCED_BLOCKS;
-  if (!synced) nitro.since = 0;
-  else if (!nitro.since) { nitro.since = Date.now(); console.log(`[nitro] synced (${nitro.behind} behind): using it`); }
+  if (!synced && nitro.since) { nitro.since = 0; console.warn(`[nitro] not synced (${nitro.behind ?? "no answer"} behind): public endpoints answer`); }
+  else if (synced && !nitro.since) { nitro.since = Date.now(); console.log(`[nitro] synced (${nitro.behind} behind): using it`); }
 }
 
 /** Start probing (once per process). */
