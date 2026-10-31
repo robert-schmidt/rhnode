@@ -16,6 +16,9 @@ import { toEventSelector } from "viem";
 export const SWAP_V2 = toEventSelector("Swap(address,uint256,uint256,uint256,uint256,address)");
 export const SWAP_V3 = toEventSelector("Swap(address,address,int256,int256,uint160,uint128,int24)");
 export const SWAP_V4 = toEventSelector("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)");
+// PancakeSwap v3 and its forks: v3's event plus two protocol-fee words, the first five words as v3's (~24K swaps a day,
+// 2026-10-30 survey); stored as v3: the pools answer v3's slot0/liquidity/ticks and their factory's getPool.
+export const SWAP_PANCAKE_V3 = toEventSelector("Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)");
 
 // A Pons v2 bonding curve (one contract per token; topics: sender, recipient). Buy data: quote in (net of fees), tokens
 // out, then two fee words; Sell: tokens in, quote out (net), two fee words. Checked against the Transfer legs of
@@ -52,7 +55,7 @@ export function decodeSwap(log: { address: string; topics: string[]; data: strin
   const t0 = (log.topics[0] ?? "").toLowerCase();
   const hex = log.data.startsWith("0x") ? log.data.slice(2) : log.data;
   try {
-    if (t0 === SWAP_V3) {
+    if (t0 === SWAP_V3 || t0 === SWAP_PANCAKE_V3) {
       if (hex.length < 64 * 5 || log.topics.length < 3) return null;
       return {
         venue: "v3", pool: log.address.toLowerCase(), sender: addr(log.topics[1]), recipient: addr(log.topics[2]),

@@ -3,7 +3,7 @@
 // the sign-extension is the part that is easy to get silently wrong.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeSwap, SWAP_V2, SWAP_V3, SWAP_V4, PONS_CURVE_BUY, PONS_CURVE_SELL } from "./swaplog.ts";
+import { decodeSwap, SWAP_V2, SWAP_V3, SWAP_V4, SWAP_PANCAKE_V3, PONS_CURVE_BUY, PONS_CURVE_SELL } from "./swaplog.ts";
 
 const w = (n: bigint) => (n < 0n ? (1n << 256n) + n : n).toString(16).padStart(64, "0");
 const topicAddr = (a: string) => "0x" + a.slice(2).padStart(64, "0");
@@ -46,4 +46,10 @@ test("Pons v2 curve: the buy and sell of 0x08f1387c… / 0xae3a30b4… as curve-
     data: "0x" + w("315220e8c3f12403f770c") + w("1fb4d9f5cb59fb") + w("53adcb1c7cf8") + w("a75b9638f9f0") })!;
   assert.deepEqual([sell.amount0 > 0n, sell.amount1], [true, -0x1fb4d9f5cb59fbn]);
   assert.equal(decodeSwap({ address: "0x1", topics: [PONS_CURVE_BUY, t("1")], data: "0x" + w("1") + w("2") }), null, "a malformed one");
+});
+
+test("PancakeSwap v3: decoded as v3 from its first five words (two protocol-fee words follow)", () => {
+  const t = (a: string) => "0x" + a.padStart(64, "0");
+  const s = decodeSwap({ address: "0xABC", topics: [SWAP_PANCAKE_V3, t("1"), t("2")], data: "0x" + [w(-5n), w(7n), w(1n << 96n), w(10n), w(-3n), w(1n), w(2n)].join("") })!;
+  assert.deepEqual([s.venue, s.pool, s.amount0, s.amount1, s.tick], ["v3", "0xabc", -5n, 7n, -3]);
 });
