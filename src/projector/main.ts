@@ -132,7 +132,12 @@ if (import.meta.main) {
     const tip = await cursor("tip");
     if (!last) last = tip; // cold start: from now on
     if (tip <= last) { await new Promise((r) => setTimeout(r, 2000)); continue; }
-    const to = Math.min(tip, last + MAX_BLOCKS);
+    // A range is written down before its rows: one interrupted after its inserts but before the cursor (a deploy, a
+    // crash) is redone with the same bounds, so the same dedup tokens and ClickHouse drops the repeat. Recomputing it to a
+    // newer tip gave new tokens and doubled its prices and trades (0.2-0.3% of rows by 2026-10-31).
+    const pending = await cursor("projector_pending");
+    const to = pending > last ? pending : Math.min(tip, last + MAX_BLOCKS);
+    if (to !== pending) await ch.insert({ table: "ctl_cursors", values: [{ name: "projector_pending", block: to, hash: "", version: Date.now() }], format: "JSONEachRow" });
     const t0 = Date.now();
     const pools = await resolvePools(up, lookup, last, to);
     const n = await project(up, last, to);

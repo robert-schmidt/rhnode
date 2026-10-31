@@ -84,6 +84,8 @@ export async function deriveTrades(from: number, to: number, curveOnly = false):
   for (const f of await rows<{ block: string; tx_index: number; tx_hash: string; time: string; recipient: string; token: string; amount: string; usdg_in: string; weth_in: string; keep: number }>(
     `SELECT block, tx_index, tx_hash, time, recipient, token, toString(amount) AS amount, toString(usdg_in) AS usdg_in, toString(weth_in) AS weth_in, keep
      FROM ev_relay WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND sign = 1`, r)) {
+    // a recipient who signed the fill and bought through a priced swap (a curve, a pool) has its trade already
+    if (out.some((o) => (o as { tx_hash: string }).tx_hash === f.tx_hash && (o as { wallet: string }).wallet === f.recipient && (o as { token: string }).token === f.token)) continue;
     const eth = Number(f.weth_in) / 1e18;
     out.push({ block: f.block, tx_index: f.tx_index, tx_hash: f.tx_hash, time: f.time, wallet: f.recipient, token: f.token, side: "buy",
       amount: f.amount, usd: Number(f.usdg_in) / 1e6 + eth * ethUsd, eth, via: "relay", keep: f.keep, sign: 1 });

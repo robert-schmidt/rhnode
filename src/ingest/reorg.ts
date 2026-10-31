@@ -37,7 +37,9 @@ export async function rollback(from: number, tag: string): Promise<void> {
   await drop(from);
   // The projector derived rows from the dropped blocks: send it back to re-derive the new branch.
   const p = (await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'projector'"))[0];
-  if (p && Number(p.block) >= from) await ch.insert({ table: "ctl_cursors", values: [{ name: "projector", block: from - 1, hash: "", version: Date.now() }], format: "JSONEachRow" });
+  // (its pending range is dropped too: redone with the old bounds, the new branch's rows would reuse the old dedup tokens)
+  if (p && Number(p.block) >= from) await ch.insert({ table: "ctl_cursors", values: [{ name: "projector", block: from - 1, hash: "", version: Date.now() },
+    { name: "projector_pending", block: 0, hash: "", version: Date.now() }], format: "JSONEachRow" });
   // So does the tracer (traces.ts): the new branch's blocks are traced again.
   const t = (await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'trace'"))[0];
   if (t && Number(t.block) >= from) await ch.insert({ table: "ctl_cursors", values: [{ name: "trace", block: from - 1, hash: "", version: Date.now() }], format: "JSONEachRow" });
