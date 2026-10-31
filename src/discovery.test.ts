@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { minterOf } from "./discovery.ts";
 
 const T = "0x1111111111111111111111111111111111111111", PAD = (a: string) => "0x" + "0".repeat(24) + a.slice(2);
-const LAUNCHPAD = "0x2222222222222222222222222222222222222222", ROUTER = "0x3333333333333333333333333333333333333333", PM = "0x4444444444444444444444444444444444444444";
+const Z0 = "0x0000000000000000000000000000000000000000", LAUNCHPAD = "0x2222222222222222222222222222222222222222", ROUTER = "0x3333333333333333333333333333333333333333", PM = "0x4444444444444444444444444444444444444444";
 
 test("minterOf: the first non-infra emitter whose log names the token, never the token or a router", () => {
   const logs = [
@@ -16,6 +16,10 @@ test("minterOf: the first non-infra emitter whose log names the token, never the
   // the token in the data, not a topic (pools.trade's TokenCreated(address, …))
   assert.equal(minterOf(T, [{ address: LAUNCHPAD, topics: ["0x4ef8"], data: "0x" + "0".repeat(24) + T.slice(2) }], new Set()), LAUNCHPAD);
   assert.equal(minterOf(T, [logs[0], logs[1]], new Set([PM])), null);
+  // Flap: a helper built in this tx names the token first; the Portal comes after
+  const HELPER = "0x5555555555555555555555555555555555555555", OWNED = "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0";
+  assert.equal(minterOf(T, [{ address: HELPER, topics: [OWNED, PAD(Z0), PAD(LAUNCHPAD)], data: "0x" }, { address: HELPER, topics: ["0x1b1e", PAD(T)], data: "0x" },
+    logs[3]], new Set()), LAUNCHPAD);
 });
 
 import { curveOf, graduationOf, type Tr } from "./discovery.ts";

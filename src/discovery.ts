@@ -38,11 +38,17 @@ type Log = { address: string; topics: string[]; data: string };
 
 /** PURE. The contract that made `token`, from its mint tx's logs: the first emitter (not the token, not `infra`) whose
  *  log names the token in a topic or its data; null when none does. */
+// Built in this tx (OwnershipTransferred from 0x0, or Initialized): a per-token helper, never the launchpad (Flap's
+// Portal makes two per token, and they name the token before it does).
+const OWNED = "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0";
+const INITIALIZED = new Set(["0x7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb3847402498", "0xc7f505b2f371ae2175ee4913f4499e1f2633a7b5936321eed1cdaeb6115181d2"]);
 export function minterOf(token: string, logs: Log[], infra: Set<string>): string | null {
   const t = token.slice(2).toLowerCase();
+  const born = new Set(logs.filter((l) => INITIALIZED.has(l.topics[0]) || (l.topics[0] === OWNED && /^0x0{64}$/.test(l.topics[1] ?? "")))
+    .map((l) => l.address.toLowerCase()));
   for (const l of logs) {
     const a = l.address.toLowerCase();
-    if (a === token || infra.has(a)) continue;
+    if (a === token || infra.has(a) || born.has(a)) continue;
     if (l.topics.slice(1).some((x) => x.toLowerCase().endsWith(t)) || l.data.toLowerCase().includes(t)) return a;
   }
   return null;
