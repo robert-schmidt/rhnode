@@ -83,7 +83,8 @@ export function since(tfs: Tf[], wallets: Set<string>, markets: Set<string>) {
 
 const tf = (r: { block: string; tx_index: number; log_index: number; tx_hash: string; from: string; to: string; amount: string; ts: number }): Tf =>
   ({ block: Number(r.block), tx_index: r.tx_index, log_index: r.log_index, tx_hash: r.tx_hash, from: r.from, to: r.to, amount: BigInt(r.amount), ts: r.ts });
-const TF_COLS = "toString(block) AS block, tx_index, log_index, tx_hash, `from`, `to`, toString(amount) AS amount, toUnixTimestamp(time) AS ts";
+// UInt64/UInt256 arrive as JSON strings; never re-alias a column under its own name (it shadows it in WHERE/ORDER BY)
+const TF_COLS = "block, tx_index, log_index, tx_hash, `from`, `to`, amount, toUnixTimestamp(time) AS ts";
 const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) / 10_000 : null);
 
 export type Reply = { status: number; body: unknown };
@@ -92,10 +93,10 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
   const [[meta], [launch], pools, [created], [tip]] = await Promise.all([
     rows<{ supply: string }>("SELECT toString(total_supply) AS supply FROM serve_tokens FINAL WHERE token = {t:String}", { t }),
     rows<{ block: string; source: string; deployer: string; detail: string }>(
-      "SELECT toString(block) AS block, source, deployer, detail FROM kept_launches FINAL WHERE token = {t:String} AND kind = 'launch' AND sign = 1 ORDER BY block LIMIT 1", { t }),
+      "SELECT block, source, deployer, detail FROM kept_launches FINAL WHERE token = {t:String} AND kind = 'launch' AND sign = 1 ORDER BY block LIMIT 1", { t }),
     rows<{ pool: string; hooks: string; created_block: string }>(
-      "SELECT pool, hooks, toString(created_block) AS created_block FROM pools FINAL WHERE token0 = {t:String} OR token1 = {t:String}", { t }),
-    rows<{ deployer: string; block: string }>("SELECT deployer, toString(block) AS block FROM contracts FINAL WHERE address = {t:String}", { t }),
+      "SELECT pool, hooks, created_block FROM pools FINAL WHERE token0 = {t:String} OR token1 = {t:String}", { t }),
+    rows<{ deployer: string; block: string }>("SELECT deployer, block FROM contracts FINAL WHERE address = {t:String}", { t }),
     rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'tip'"),
   ]);
   if (!meta) return { status: 404, body: { error: "rhnode hasn't seen this token (no ERC-20 transfer yet)" } };
@@ -146,11 +147,11 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
       "SELECT holder, toString(sum(balance)) AS b FROM agg_balances WHERE token = {t:String} AND holder IN {w:Array(String)} GROUP BY holder", { t, w: ws }) : [],
     txSigners(up, txh),
     ws.length || deployer ? rows<{ dst: string; src: string; block: string }>(
-      `SELECT dst, src, toString(block) AS block FROM native_edges FINAL WHERE dst IN {w:Array(String)} ORDER BY block, tx_index, path LIMIT 1 BY dst`,
+      `SELECT dst, src, block FROM native_edges FINAL WHERE dst IN {w:Array(String)} ORDER BY block, tx_index, path LIMIT 1 BY dst`,
       { w: [...ws, ...(deployer ? [deployer] : [])] }) : [],
     ws.length ? rows<{ wallet: string; b: string }>("SELECT wallet, toString(min(first).1) AS b FROM agg_wallet_first WHERE wallet IN {w:Array(String)} GROUP BY wallet", { w: ws }) : [],
     txh.length ? rows<{ token: string; from: string; tx_hash: string; amount: string }>(
-      `SELECT token, \`from\`, tx_hash, toString(amount) AS amount FROM kept_transfers FINAL WHERE token IN {q:Array(String)} AND block >= {a:UInt64} AND block <= {b:UInt64}
+      `SELECT token, \`from\`, tx_hash, amount FROM kept_transfers FINAL WHERE token IN {q:Array(String)} AND block >= {a:UInt64} AND block <= {b:UInt64}
        AND tx_hash IN {h:Array(String)} AND sign = 1`, { q: [WETH, USDG], a: from, b: to, h: txh }) : [],
     rows<{ p: number }>(`SELECT argMaxMerge(close_usd) AS p FROM agg_candles_1m WHERE token = {z:String} AND minute <= toDateTime({at:UInt64})
       AND minute >= toDateTime({at:UInt64}) - 3600`, { z: NATIVE_ETH, at: t0 }),
@@ -162,9 +163,9 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
   const recvd = new Map<string, bigint>(); // tx → tokens all buyers received in it
   for (const b of buyers) for (const [h, a] of b.txs) recvd.set(h, (recvd.get(h) ?? 0n) + a);
   const fund = new Map(funders.map((f) => [f.dst, f]));
-  const hubs = funders.length ? new Map((await rows<{ src: string; n: string; peers: string }>(
-    "SELECT src, toString(uniqMerge(n)) AS n, toString(uniqMerge(peers)) AS peers FROM agg_native_src WHERE src IN {s:Array(String)} GROUP BY src",
-    { s: [...new Set(funders.map((f) => f.src))] })).map((h) => [h.src, h])) : new Map<string, { n: string; peers: string }>();
+  const hubs = funders.length ? new Map((await rows<{ src: string; edges: string; wallets: string }>(
+    "SELECT src, toString(uniqMerge(n)) AS edges, toString(uniqMerge(peers)) AS wallets FROM agg_native_src WHERE src IN {s:Array(String)} GROUP BY src",
+    { s: [...new Set(funders.map((f) => f.src))] })).map((h) => [h.src, h])) : new Map<string, { edges: string; wallets: string }>();
   const deployerFunder = deployer ? fund.get(deployer)?.src ?? null : null;
   await isContract(ws.filter((a) => !code.has(a)));
   const s = since(later, wset, markets), bal = new Map(bals.map((b) => [b.holder, BigInt(b.b)])), first = new Map(firsts.map((f) => [f.wallet, Number(f.b)]));
@@ -199,7 +200,7 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
         balance: now.toString(), max_held: (w?.max ?? b.net).toString(), sold: now < (w?.max ?? b.net), sold_out: now * 10n < (w?.max ?? b.net),
         first_out_block: w?.out ?? null, first_sell_block: w?.sell ?? null,
         groups: { same_tx: gTx(b), same_block: gBlock(b), same_signer: gSigner(b) },
-        funding: f ? { funder: f.src, block: Number(f.block), funder_n: Number(hub?.n ?? 0), funder_peers: Number(hub?.peers ?? 0),
+        funding: f ? { funder: f.src, block: Number(f.block), funder_n: Number(hub?.edges ?? 0), funder_peers: Number(hub?.wallets ?? 0),
           funder_is_deployer: !!deployer && f.src === deployer, funder_shared_with_deployer: !!deployerFunder && f.src === deployerFunder } : null,
         wallet_first_block: first.get(b.wallet) ?? null, is_contract: code.get(b.wallet) ?? null,
       };
@@ -212,7 +213,7 @@ export async function earlyBuyers(up: Up, t: string, blocks: number, n: number, 
 async function txSigners(up: Up, hashes: string[]): Promise<{ hash: string; from: string; value: bigint }[]> {
   if (!hashes.length) return [];
   const got = await rows<{ hash: string; from: string; value: string }>(
-    "SELECT hash, `from`, toString(value) AS value FROM raw_txs WHERE hash IN {h:Array(String)} UNION ALL SELECT hash, `from`, toString(value) AS value FROM kept_txs WHERE hash IN {h:Array(String)}", { h: hashes });
+    "SELECT hash, `from`, value FROM raw_txs WHERE hash IN {h:Array(String)} UNION ALL SELECT hash, `from`, value FROM kept_txs WHERE hash IN {h:Array(String)}", { h: hashes });
   const m = new Map(got.map((r) => [r.hash, { hash: r.hash, from: r.from, value: BigInt(r.value) }]));
   await Promise.all(hashes.filter((h) => !m.has(h)).map(async (h) => {
     const x = await up.call<{ from: string; value: string } | null>("eth_getTransactionByHash", [h]).catch(() => null);
