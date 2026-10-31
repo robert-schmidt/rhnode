@@ -1,6 +1,9 @@
 // Token cards: the facts about a token that apps and the explorer show, from ClickHouse and the main pool's state at
 // the tip. Read by the API (GET /v1/tokens/{t}, POST /v1/tokens) and the explorer's token pages. Definitions (2026-10-31):
-// - main pool: against a quote asset, verified first, then most net USD volume in 24 h, then most ever (1-minute candles);
+// - main pool: a launchpad token's own market (official: true), never another pool: Pons v2's curve until it graduates, then
+//   the meme-hook v4 pool created in the graduation's block (decoys use that hook too); Flap's and hood.fun's migration pool
+//   (none before, as their curves aren't decoded); Bags' poolId from TokenCreated. Any other token: against a quote asset,
+//   verified first, then most net USD volume in 24 h, then most ever (1-minute candles);
 // - net volume: a tx's swaps in one pool count as what is left after buys and sells cancel (a same-tx round trip, wash,
 //   counts ~0); the *_raw_usd fields keep the gross, so wash shows as the gap;
 // - liquidity_usd from the pool's state at the tip: a bonding curve's real quote balance (price: its last trade); v2 reserves; v3 and v4 active liquidity (the tokens the positions
@@ -20,7 +23,7 @@
 import { parseAbi } from "viem";
 import { rows } from "./ch.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
-import { MULTICALL3, NATIVE_ETH, USDG, V4_STATE_VIEW, WETH } from "./chain/constants.ts";
+import { MULTICALL3, NATIVE_ETH, PONS_V2_MEME_HOOK, USDG, V4_STATE_VIEW, WETH } from "./chain/constants.ts";
 import { QUOTE_DECIMALS, sides } from "./projector/prices.ts";
 import { multicall, type Call } from "./projector/pools.ts";
 import type { Client } from "./chain/upstream.ts";
@@ -45,6 +48,15 @@ export const NET24 = `SELECT token, pool, any(qt) AS q, sum(abs(nt)) AS nv, sum(
   FROM (SELECT token, pool, tx_hash, any(quote) AS qt, min(time) AS tm,
     sum(if(quote_delta > 0, usd, -usd) * sign) AS nt, sum(usd * sign) AS gr FROM ev_prices
     WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, pool, tx_hash) GROUP BY token, pool`;
+// per launchpad token, its own market (op; '' when it has none yet); tested on the node's ClickHouse 2026-10-31
+const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' AND m.token != '', g.pool, l.source = 'pons-v2', JSONExtractString(l.detail, 'curve'),
+    l.source = 'bags', JSONExtractString(l.detail, 'poolId'), JSONExtractString(m.detail, 'pool')) AS op
+  FROM (SELECT token, source, detail FROM kept_launches FINAL WHERE token IN {t:Array(String)} AND kind = 'launch' AND sign = 1
+        AND source IN ('pons-v2', 'bags', 'flap', 'hood-fun') ORDER BY block LIMIT 1 BY token) AS l
+  LEFT JOIN (SELECT token, block, detail FROM kept_launches FINAL WHERE token IN {t:Array(String)} AND kind = 'migration' AND sign = 1
+        ORDER BY block LIMIT 1 BY token) AS m ON m.token = l.token
+  LEFT JOIN (SELECT tk, pool, created_block FROM pools FINAL ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
+        AND tk IN {t:Array(String)}) AS g ON g.tk = l.token AND g.created_block = m.block`;
 const BAND = 92_103, MAX_TICK = 887_272; // ln(10,000) / ln(1.0001) ticks each side
 const LAUNCHPADS = [...PROTOCOL.values()].filter((e) => e.kind === "launchpad").map((e) => e.address);
 const LOCKERS = [...PROTOCOL.values()].filter((e) => e.kind === "locker").map((e) => e.address);
@@ -61,7 +73,7 @@ async function eth(): Promise<number | null> {
 const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) / 10_000 : null);
 const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
-type Pool = { token: string; pool: string; venue: string; quote: string; v24: number; raw24: number; v: number; verified: number; token0: string; token1: string; created_block: string; spacing: number };
+type Pool = { token: string; pool: string; venue: string; v24: number; raw24: number; v: number; verified: number; official: number; token0: string; token1: string; created_block: string; spacing: number };
 type Mid = { price: number | null; liquidityUsd: number | null; quoteUsd: number | null; kind: "reserves" | "active" | "curve"; balancesUsd: number | null };
 
 /** PURE. Price (quote per token, human units) and liquidity from a pool's state at the tip. */
@@ -123,12 +135,15 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       `SELECT token, deployer, source, toString(block) AS block, toUnixTimestamp(time) AS time, detail FROM kept_launches FINAL
        WHERE token IN {t:Array(String)} AND kind = 'launch' AND sign = 1 ORDER BY block LIMIT 1 BY token`, { t }),
     rows<Pool>(
-      `SELECT c.token AS token, c.pool AS pool, toString(p.venue) AS venue, c.quote AS quote, n.nv AS v24, n.rv AS raw24, c.v AS v, p.verified AS verified,
-         p.token0 AS token0, p.token1 AS token1, toString(p.created_block) AS created_block, p.tick_spacing AS spacing
-       FROM (SELECT token, pool, any(quote) AS quote, sum(volume_usd) AS v
-             FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool) AS c
+      // an official pool with no trade yet is a candidate too (volume 0)
+      `SELECT c.token AS token, c.pool AS pool, toString(p.venue) AS venue, n.nv AS v24, n.rv AS raw24, c.vol AS v, p.verified AS verified,
+         p.token0 AS token0, p.token1 AS token1, toString(p.created_block) AS created_block, p.tick_spacing AS spacing, o.token != '' AS official
+       FROM (SELECT token, pool, sum(vu) AS vol FROM (SELECT token, pool, sum(volume_usd) AS vu FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool
+             UNION ALL SELECT token, op AS pool, 0 AS vu FROM (${OFFICIAL}) WHERE op != '') GROUP BY token, pool) AS c
        LEFT JOIN (${NET24}) AS n ON n.token = c.token AND n.pool = c.pool
        INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL WHERE ok = 1) AS p ON p.pool = c.pool
+       LEFT JOIN (${OFFICIAL}) AS o ON o.token = c.token
+       WHERE o.token = '' OR c.pool = o.op
        ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token`, { t }),
     rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
@@ -242,7 +257,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
         : { sqrt: w(0)?.[0], L: w(1), b0: w(2), b1: w(3), band: bands.get(tk) };
       const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote], qUsd, st);
       main = {
-        pool: p.pool, venue: p.venue, quote: sd.quote, verified: p.verified === 1, created_block: Number(p.created_block) || null,
+        pool: p.pool, venue: p.venue, quote: sd.quote, verified: p.verified === 1, official: p.official === 1, created_block: Number(p.created_block) || null,
         price: ms?.price ?? null, price_usd: ms?.price != null && qUsd != null ? ms.price * qUsd : null,
         liquidity_usd: ms?.liquidityUsd ?? null, liquidity_quote_usd: ms?.quoteUsd ?? null, liquidity_kind: ms?.kind ?? null,
         ...(p.venue === "v3" ? { liquidity_balances_usd: ms?.balancesUsd ?? null } : {}),
