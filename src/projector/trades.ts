@@ -10,6 +10,7 @@
 // balance of it. A router or solver moving tokens for someone else changes nothing of its own and isn't a trade.
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
+import { onlySql, type Only } from "./prices.ts";
 
 export const USER_OP_EVENT = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
 
@@ -47,11 +48,11 @@ export function tradesOfTx(signer: string, transfers: Transfer[], prices: Price[
   return out;
 }
 
-/** Trades for every tx in (from, to] with a priced swap, plus Relay fills. venue (src/tools/venue-backfill.ts): only
- *  txs with a price of that venue and no trade yet, no Relay fills. */
-export async function deriveTrades(from: number, to: number, venue?: "curve" | "omm"): Promise<number> {
-  const r = { from, to, ...await span(from, to) };
-  const only = venue ? `AND venue = '${venue}') AND hash NOT IN (SELECT tx_hash FROM ev_trades WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}` : "";
+/** Trades for every tx in (from, to] with a priced swap, plus Relay fills. only (src/tools/venue-backfill.ts): just txs
+ *  with a price of that subset and no trade yet, no Relay fills. */
+export async function deriveTrades(from: number, to: number, o?: Only): Promise<number> {
+  const r = { from, to, ...await span(from, to), ...(o ? { only_pools: o.pools ?? [] } : {}) };
+  const only = o ? `${onlySql(o)}) AND hash NOT IN (SELECT tx_hash FROM ev_trades WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}` : "";
   const txs = await rows<{ block: string; tx_index: number; tx_hash: string; time: string; signer: string; keep: number }>(
     `SELECT block, tx_index, hash AS tx_hash, time, \`from\` AS signer, keep FROM raw_txs
      WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only})`, r);
@@ -76,7 +77,7 @@ export async function deriveTrades(from: number, to: number, venue?: "curve" | "
         side: t.amount > 0n ? "buy" : "sell", amount: t.amount.toString(), usd: t.usd, eth: t.eth, via: t.via, keep: tx.keep, sign: 1 });
     }
   }
-  if (venue) { await insert("ev_trades", out, `${venue}-trades:${from}-${to}`); return out.length; }
+  if (o) { await insert("ev_trades", out, `${o.tag}-trades:${from}-${to}`); return out.length; }
   // Relay fills: the recipient bought, paid in USDG and/or WETH on the solver's side.
   // The last day first (a day partition or two instead of all of raw), then everything.
   const lastEthUsd = (bound: string) => rows<{ p: number }>(`SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND eth_usd > 0 ${bound} ORDER BY block DESC LIMIT 1`, r);
