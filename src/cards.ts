@@ -51,14 +51,17 @@ export const NET24 = `SELECT token, pool, any(qt) AS q, sum(abs(nt)) AS nv, sum(
     sum(if(quote_delta > 0, usd, -usd) * sign) AS nt, sum(usd * sign) AS gr FROM ev_prices
     WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, pool, tx_hash) GROUP BY token, pool`;
 // per launchpad token (rows only for tokens of Pons v2, Bags, Flap, hood.fun), its own market (op; '' when it has none yet);
-// tested on the node's ClickHouse 2026-10-31
+// tested on the node's ClickHouse 2026-10-31. FINAL doesn't move WHERE to PREWHERE, so it read every row's detail: the
+// PREWHERE columns are the same in every version of a row (token, kind: in its key; hooks, tokens, created_block: fixed
+// for a pool), so filtering before the merge keeps FINAL's answer (sign stays after it). Measured 2026-11-01, 50 tokens:
+// 8.6 s / 300 MiB → 2.4 s / 62 MiB, same rows
 export const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' AND m.token != '', g.pool, l.source = 'pons-v2', JSONExtractString(l.detail, 'curve'),
     l.source = 'bags', JSONExtractString(l.detail, 'poolId'), JSONExtractString(m.detail, 'pool')) AS op
-  FROM (SELECT token, source, detail FROM kept_launches FINAL WHERE token IN {t:Array(String)} AND kind = 'launch' AND sign = 1
+  FROM (SELECT token, source, detail FROM kept_launches FINAL PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1
         AND source IN ('pons-v2', 'bags', 'flap', 'hood-fun') ORDER BY block LIMIT 1 BY token) AS l
-  LEFT JOIN (SELECT token, block, detail FROM kept_launches FINAL WHERE token IN {t:Array(String)} AND kind = 'migration' AND sign = 1
+  LEFT JOIN (SELECT token, block, detail FROM kept_launches FINAL PREWHERE token IN {t:Array(String)} AND kind = 'migration' WHERE sign = 1
         ORDER BY block LIMIT 1 BY token) AS m ON m.token = l.token
-  LEFT JOIN (SELECT tk, pool, created_block FROM pools FINAL ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
+  LEFT JOIN (SELECT DISTINCT tk, pool, created_block FROM pools ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
         AND tk IN {t:Array(String)}) AS g ON g.tk = l.token AND g.created_block = m.block`;
 const BAND = 92_103, MAX_TICK = 887_272; // ln(10,000) / ln(1.0001) ticks each side
 const LAUNCHPADS = [...PROTOCOL.values()].filter((e) => e.kind === "launchpad").map((e) => e.address);
@@ -152,7 +155,8 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
        FROM (SELECT token, pool, sum(vu) AS vol FROM (SELECT token, pool, sum(volume_usd) AS vu FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool
              UNION ALL SELECT token, op AS pool, 0 AS vu FROM (${OFFICIAL}) WHERE op != '') GROUP BY token, pool) AS c
        LEFT JOIN (${NET24}) AS n ON n.token = c.token AND n.pool = c.pool
-       INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL WHERE ok = 1) AS p ON p.pool = c.pool
+       INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL
+         PREWHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)} WHERE ok = 1) AS p ON p.pool = c.pool
        LEFT JOIN (${OFFICIAL}) AS o ON o.token = c.token
        WHERE o.token = '' OR c.pool = o.op
        ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token`, { t }),
