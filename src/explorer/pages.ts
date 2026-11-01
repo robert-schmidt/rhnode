@@ -113,7 +113,7 @@ ${tile(`${((m1.span / Number(m1.b.blocks)) * 1000).toFixed(0)} ms`, "block time"
 ${tile(gwei(m1.t.gp50), "gas price (median)")}
 ${tile(ethUsd ? usd(ethUsd) : "?", "ETH price, on-chain")}
 ${tile(ethUsd ? usd(feeEth(h1.fees) * ethUsd) : `${feeEth(h1.fees).toFixed(3)} ETH`, "fees paid, last hour")}
-<div title="Failed user txs in the last 5 minutes; normal below 1.5× the last day's share, degraded from 2×"><b${fs && fs.level !== "normal" ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min${fs ? ` (day: ${(failed(d1) * 100).toFixed(1)}%)` : ""}</span></div>` : html``;
+<div title="Failed user txs in the last 5 minutes${fs ? `, against ${(failed(d1) * 100).toFixed(1)}% over the last day` : ""}: normal below 1.5× the day's share, elevated from 1.5×, degraded from 2×"><b${fs && fs.level !== "normal" ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min</span></div>` : html``;
   return { tiles, table: html`<h2>Network <span class="muted small">(from our index; ETH ${ethUsd ? usd(ethUsd) : "?"} from on-chain pools)</span></h2>
 <div class="tw"><table class="stats-table"><tr><th></th>${cols.map((c) => html`<th>${label(c.w, c.span)}</th>`)}</tr>
 ${row("Transactions", (c) => c.n.toLocaleString("en-US"))}
