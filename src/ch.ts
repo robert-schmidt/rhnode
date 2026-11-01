@@ -5,6 +5,10 @@ import { cfg } from "./config.ts";
 // Idle sockets live 8 s (the client default is 2.5 s, the server's keep_alive_timeout 10 s): a quiet API caller then
 // reuses the connection instead of paying a new one (~4 ms over the LAN, measured 2026-10-30).
 export const ch = createClient({ ...cfg.clickhouse, request_timeout: 60_000, keep_alive: { idle_socket_ttl: 8000 } });
+// "bulk" queries get their own sockets (10 per client, the client's default): a burst of card/pool-report queries then
+// queues behind itself, not in front of the explorer, /rpc or a chart. Seen 2026-11-01: a chart's two queries, 1 s in
+// ClickHouse, waited 35 s in the client for one of the shared 10. ponytail: no new connections until a bulk query runs.
+const bulkCh = createClient({ ...cfg.clickhouse, request_timeout: 60_000, keep_alive: { idle_socket_ttl: 8000 } });
 
 /** Insert with a dedup token: the same token twice (crash replay, a re-run of the same aligned
  *  batch) is dropped by ClickHouse, in the table and in the MVs it feeds. */
@@ -22,12 +26,12 @@ export async function insert(table: string, values: object[], token: string): Pr
 
 /** The ClickHouse CPU workload (migration 030) of the queries run inside `workload.run(name, f)`: "bulk" for heavy
  *  reads apps make in volume (cards, pool reports, discovery), which then get a quarter of the CPU while anything else
- *  wants it, and all of it when nothing does. Everything else runs in "default". */
+ *  wants it, and all of it when nothing does, over their own sockets. Everything else runs in "default". */
 export const workload = new AsyncLocalStorage<string>();
 
 export async function rows<T>(query: string, query_params?: Record<string, unknown>): Promise<T[]> {
   const w = workload.getStore();
-  return (await ch.query({ query, query_params, format: "JSONEachRow", ...(w ? { clickhouse_settings: { workload: w } } : {}) })).json<T>();
+  return (await (w === "bulk" ? bulkCh : ch).query({ query, query_params, format: "JSONEachRow", ...(w ? { clickhouse_settings: { workload: w } } : {}) })).json<T>();
 }
 
 /** The time span {t0, t1} of blocks (from, to], for `inSpan()`: raw/ev tables are partitioned by day on `time` and sorted by
