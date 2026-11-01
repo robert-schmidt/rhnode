@@ -147,7 +147,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t }),
     rows<{ token: string; deployer: string; source: string; block: string; time: number; detail: string }>(
       `SELECT token, deployer, source, toString(block) AS block, toUnixTimestamp(time) AS time, detail FROM kept_launches FINAL
-       WHERE token IN {t:Array(String)} AND kind = 'launch' AND sign = 1 ORDER BY block LIMIT 1 BY token`, { t }),
+       PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1 ORDER BY block LIMIT 1 BY token`, { t }), // PREWHERE: as in OFFICIAL
     rows<Pool>(
       // an official pool with no trade yet is a candidate too (volume 0)
       `SELECT c.token AS token, c.pool AS pool, toString(p.venue) AS venue, n.nv AS v24, n.rv AS raw24, c.vol AS v, p.verified AS verified,
