@@ -33,18 +33,24 @@ async function main(fromDate: string) {
   // A long read streams for minutes: its own client, so the shared one's 60 s timeout doesn't cut it.
   const long = createClient({ ...cfg.clickhouse, request_timeout: 3_600_000, clickhouse_settings: { workload: "bulk" } });
 
-  // ETH/USD per bucket, from the verified ETH/USDG pools (a few pools: key lookups)
+  // ETH/USD per bucket, from the verified ETH/USDG pools (814 on 2026-11-01). One pool at a time, in key order: all of
+  // them in one FINAL read took 4.7 GiB and hit the server's cap; the busiest alone is 530 MiB, 7.7 s (2026-11-01).
   const ethPools = (await rows<{ pool: string }>(
     `SELECT pool FROM pools FINAL WHERE verified = 1 AND ok = 1 AND ((token0 IN {e:Array(String)} AND token1 = {u:String}) OR (token1 IN {e:Array(String)} AND token0 = {u:String}))`,
     { e: [WETH, NATIVE_ETH], u: USDG })).map((p) => p.pool);
   const byBucket = new Map<number, number[]>();
-  for (const s of await rows<Row>(
-    `SELECT ${SWAP_COLS} FROM kept_swaps AS s FINAL INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE pool IN {p:Array(String)}) AS p USING pool
-     WHERE s.pool IN {p:Array(String)} AND s.time >= toDateTime({from:UInt32}) - INTERVAL 1 DAY AND s.block < {g:UInt64} AND s.sign = 1`, { ...r, p: ethPools })) {
-    const p = priceSwap(s, 18, 1);
-    if (!p || p.quote !== USDG || p.quoteAmount < 100) continue;
-    const b = Math.floor(Number(s.block) / ETH_BUCKET);
-    (byBucket.get(b) ?? byBucket.set(b, []).get(b)!).push(p.price);
+  for (const pool of ethPools) {
+    const rs = await long.query({
+      query: `SELECT ${SWAP_COLS} FROM kept_swaps AS s FINAL INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE pool = {p:String}) AS p USING pool
+        WHERE s.pool = {p:String} AND s.time >= toDateTime({from:UInt32}) - INTERVAL 1 DAY AND s.block < {g:UInt64} AND s.sign = 1 ORDER BY s.block, s.log_index`,
+      query_params: { ...r, p: pool }, format: "JSONEachRow",
+    });
+    for await (const chunk of rs.stream()) for (const row of chunk) {
+      const s = row.json<Row>(), p = priceSwap(s, 18, 1);
+      if (!p || p.quote !== USDG || p.quoteAmount < 100) continue;
+      const b = Math.floor(Number(s.block) / ETH_BUCKET);
+      (byBucket.get(b) ?? byBucket.set(b, []).get(b)!).push(p.price);
+    }
   }
   const med = new Map([...byBucket].map(([b, ps]) => [b, ps.sort((x, y) => x - y)[Math.floor(ps.length / 2)]]));
   const keys = [...med.keys()].sort((a, b) => a - b);
