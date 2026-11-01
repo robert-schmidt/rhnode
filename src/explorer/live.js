@@ -2,6 +2,45 @@
 // ones it shows (data-o: block, or block and tx index) in at the top, spread over the poll interval so the list moves like the chain does. Pointing at a list (or focusing
 // into it) pauses it; a hidden tab doesn't poll. Without this script the page refreshes itself (<noscript>).
 "use strict";
+// Chain charts (charts.ts): a crosshair and readout at the nearest point on hover, or on keyboard focus with the arrow
+// keys. Values go in with textContent; the table under each chart has them all without this.
+(() => {
+  for (const svg of document.querySelectorAll("svg[data-pts]")) {
+    let pts;
+    try { pts = JSON.parse(svg.dataset.pts); } catch { continue; }
+    const tip = svg.parentElement.querySelector(".tip"), xh = svg.querySelector(".xh"), dot = svg.querySelector(".dot");
+    if (!tip || !xh || !dot || !pts.length) continue;
+    const [val, when, band] = tip.children;
+    let at = -1;
+    const show = (i) => {
+      at = Math.max(0, Math.min(pts.length - 1, i));
+      const [x, y, t, v, b] = pts[at];
+      for (const [k, n] of [["x1", x], ["x2", x]]) xh.setAttribute(k, n);
+      dot.setAttribute("cx", x); dot.setAttribute("cy", y);
+      xh.setAttribute("visibility", "visible"); dot.setAttribute("visibility", "visible");
+      val.textContent = v; when.textContent = t; band.textContent = b ? `p10 – p90: ${b}` : ""; band.hidden = !b;
+      tip.hidden = false;
+      const w = svg.getBoundingClientRect().width, px = (x / svg.viewBox.baseVal.width) * w, half = tip.offsetWidth / 2;
+      tip.style.left = `${Math.min(Math.max(px, half), w - half)}px`;
+    };
+    const hide = () => { at = -1; tip.hidden = true; xh.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); };
+    svg.addEventListener("pointermove", (e) => {
+      const r = svg.getBoundingClientRect(), x = ((e.clientX - r.left) / r.width) * svg.viewBox.baseVal.width;
+      let best = 0;
+      for (let i = 1; i < pts.length; i++) if (Math.abs(pts[i][0] - x) < Math.abs(pts[best][0] - x)) best = i;
+      show(best);
+    });
+    svg.addEventListener("pointerleave", hide);
+    svg.addEventListener("focus", () => show(pts.length - 1));
+    svg.addEventListener("blur", hide);
+    svg.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      show(at + (e.key === "ArrowRight" ? 1 : -1));
+    });
+  }
+})();
+
 (() => {
   const POLL = 1500, KEEP = 15; // /live carries ~4 s of blocks, so a poll never skips one
   const lists = ["blocks", "txs"].map((id) => { const el = document.getElementById(id); return { el, badge: el && el.closest("section").querySelector(".live"), queue: [], held: false }; });

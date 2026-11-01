@@ -7,6 +7,7 @@ import { CSS, CSS_PATH, html, JS, JS_PATH, page, REPO, type Html } from "./html.
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
 import { address, block, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
+import { RANGES, type Range } from "./charts.ts";
 
 const SECURITY = {
   "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -18,7 +19,10 @@ type Route = { key: string; ttl: number; q?: string; run: (rpc: Rpc) => Promise<
 
 /** PURE: the page a path asks for, with a cache key made only of validated parts; null = not ours. */
 export function route(path: string, qs: URLSearchParams): Route {
-  if (path === "/") return { key: "/", ttl: 2, run: (rpc) => home(rpc) };
+  if (path === "/") {
+    const range = (Object.hasOwn(RANGES, qs.get("range") ?? "") ? qs.get("range") : "7d") as Range; // anything else: the default
+    return { key: `/?range=${range}`, ttl: 2, run: (rpc) => home(rpc, range) };
+  }
   if (path === "/live") return { key: "/live", ttl: 1, run: (rpc) => live(rpc) };
   let m = path.match(/^\/block\/([^/]+)$/);
   if (m) {

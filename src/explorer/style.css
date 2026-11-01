@@ -1,5 +1,5 @@
-:root { --bg: #fafaf7; --fg: #1b1d1f; --muted: #6b7075; --line: #e3e3dd; --card: #fff; --acc: #0b7a4b; --bad: #b3261e; --tag: #eef3ef; }
-@media (prefers-color-scheme: dark) { :root { --bg: #111314; --fg: #e6e7e8; --muted: #93999e; --line: #2a2e31; --card: #181b1d; --acc: #4cc38a; --bad: #ff7b72; --tag: #1f2a24; } }
+:root { --chart: #0b7a4b; --bg: #fafaf7; --fg: #1b1d1f; --muted: #6b7075; --line: #e3e3dd; --card: #fff; --acc: #0b7a4b; --bad: #b3261e; --tag: #eef3ef; }
+@media (prefers-color-scheme: dark) { :root { --chart: #36a372; --bg: #111314; --fg: #e6e7e8; --muted: #93999e; --line: #2a2e31; --card: #181b1d; --acc: #4cc38a; --bad: #ff7b72; --tag: #1f2a24; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 a { color: var(--acc); text-decoration: none; } a:hover { text-decoration: underline; }
@@ -80,3 +80,24 @@ h2 .live { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px
   .feed.txs .h { grid-area: h; } .feed.txs .mv { grid-area: mv; max-width: 45vw; } .feed.txs .ft { grid-area: ft; display: flex; gap: 6px; flex-wrap: wrap; font-size: 13px; }
   .feed.txs .ft .sub { display: inline; margin: 0; font-size: 13px; }
 }
+/* Chain over time (charts.ts). --chart is the accent validated as a chart mark on each card surface. */
+.seg { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; font-size: 13px; }
+.seg a, .seg b { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); }
+.seg b { background: var(--tag); font-weight: 600; }
+.charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .charts { grid-template-columns: minmax(0, 1fr); } figure.ch .plot text { font-size: 12px; } }
+figure.ch { margin: 0; min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px 6px; }
+figure.ch figcaption { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 0 8px; margin-bottom: 4px; }
+figure.ch figcaption span { font-weight: 600; } figure.ch figcaption b { font-size: 17px; white-space: nowrap; }
+figure.ch figcaption small { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+.plot { position: relative; } .plot svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.plot svg:focus { outline: 2px solid var(--acc); outline-offset: 2px; border-radius: 4px; } .plot svg:focus:not(:focus-visible) { outline: none; }
+.plot .grid { stroke: var(--line); stroke-width: 1; }
+.plot text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; } .plot .ytick { text-anchor: end; } .plot .xtick { text-anchor: middle; }
+.plot .line { fill: none; stroke: var(--chart); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.plot .area { fill: var(--chart); opacity: .1; } .plot .band { fill: var(--chart); opacity: .16; }
+.plot .end, .plot .dot { fill: var(--chart); stroke: var(--card); stroke-width: 2; } .plot .xh { stroke: var(--muted); stroke-width: 1; }
+.tip { position: absolute; top: -6px; transform: translate(-50%, -100%); pointer-events: none; z-index: 1; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px rgb(0 0 0 / .12); }
+.tip b { display: block; font-size: 14px; } .tip span, .tip small { display: block; color: var(--muted); }
+figure.ch details summary { font-size: 12px; color: var(--muted); } figure.ch .tw { max-height: 240px; overflow: auto; }

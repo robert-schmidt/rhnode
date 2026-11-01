@@ -5,6 +5,7 @@ import { rows } from "../ch.ts";
 import { ago, compact, stamp, eth, html, link, short, sparkline, units, usd, utc, when, type Html } from "./html.ts";
 import { bare, lookup, methods } from "./names.ts";
 import { requested } from "../watch.ts";
+import { chainCharts, type Range } from "./charts.ts";
 import { cards, NET24 } from "../cards.ts";
 import { earlyBuyers } from "../early.ts";
 import { labelsOf, type Label } from "../labels.ts";
@@ -161,14 +162,15 @@ function glance(wei: bigint, ms: Move[], meta: Map<string, Token>): Html {
 const LIVE = html`<span class="live" hidden><i></i><span>Live</span></span>`; // live.js shows it, per list
 const liveTiles = (head: number, net: Stats) => html`<div><b>${link("block", head)}</b><span>latest block</span></div>${net.tiles}`;
 
-export async function home(rpc: Rpc): Promise<Page> {
-  const { head, blockRows, txRows, net } = await latest(rpc);
+export async function home(rpc: Rpc, range: Range = "7d"): Promise<Page> {
+  const [{ head, blockRows, txRows, net }, charts] = await Promise.all([latest(rpc), chainCharts(range)]);
   return { status: 200, title: "Latest blocks and transactions", refresh: 10, live: true, body: html`
 <h1>Robinhood Chain</h1>
 <div class="stats" id="tiles">${liveTiles(head, net)}</div>
 <div class="cols"><section><h2>Latest blocks ${LIVE}</h2><ol class="feed blocks" id="blocks">${blockRows.slice(0, 15)}</ol></section>
 <section><h2>Latest transactions ${LIVE}</h2><ol class="feed txs" id="txs">${txRows}</ol></section></div>
 <div id="net">${net.table}</div>
+${charts}
 <p class="muted small" id="hint">New blocks and transactions come in at the top; pointing at a list pauses it. Failed transactions are dimmed.</p>` };
 }
 
