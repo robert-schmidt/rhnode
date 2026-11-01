@@ -282,8 +282,8 @@ const TX_COLS = "hash, block, tx_index, `from`, `to`, toString(value) AS v, sele
  *  ClickHouse while it holds it, else from the node. */
 async function walletTxs(rpc: Rpc, a: string, before: number): Promise<WTx[]> {
   const ptrs = await rows<{ block: string; tx_index: number }>(
-    `SELECT DISTINCT block, tx_index FROM idx_wallet_txs WHERE wallet = {a:String} ${before ? "AND block < {before:UInt64}" : ""}
-     ORDER BY block DESC, tx_index DESC LIMIT 25`, { a, before });
+    `SELECT block, tx_index FROM idx_wallet_txs WHERE wallet = {a:String} ${before ? "AND block < {before:UInt64}" : ""}
+     ORDER BY block DESC, tx_index DESC LIMIT 1 BY block, tx_index LIMIT 25`, { a, before });
   if (!ptrs.length) return [];
   const b = [...new Set(ptrs.map((p) => p.block))];
   const have = new Map((await rows<WTx>(
@@ -306,14 +306,19 @@ type Edge = { peer: string; v: string; block: string; tx_index: number; type: nu
 type Side = { edges: number; wallets: number; wei: string };
 const BRIDGE: Record<number, string> = { 100: "L1 deposit", 104: "retryable", 105: "retryable" };
 const EDGE_COLS = "toString(value) AS v, block, tx_index, type, toUnixTimestamp(time) AS ts";
+// The wallet page's lists read in key order without FINAL and drop a not-yet-merged duplicate with LIMIT 1 BY the key
+// (duplicates share every column read), so they stop after a page instead of merging the wallet's whole history.
+// Measured 2026-11-01, busy wallet, same rows (md5, fixed block range): transfers 272 s / 86 GiB → 2.6 s / 0.5 GiB;
+// a quiet one: 3.8 s → 0.2 s, edges 0.9 → 0.1 s, txs 1.0 → 0.1 s.
+const FIRST = "ORDER BY block, tx_index, path LIMIT 1 BY block, tx_index, path";
 const SIDE = (t: string, k: string) => `SELECT uniqMerge(n) AS edges, uniqMerge(peers) AS wallets, toString(sum(total)) AS wei FROM ${t} WHERE ${k} = {a:String}`;
 
 /** The wallet's ETH funding (migration 016, transfers that happened): its first funders with how many wallets each
  *  funded (a funder of thousands is an exchange, solver or bridge), the first wallets it funded, and both sides' totals. */
 async function funding(rpc: Rpc, a: string) {
   const [first, funded, [inSide], [outSide]] = await Promise.all([
-    rows<Edge>(`SELECT src AS peer, ${EDGE_COLS} FROM native_edges FINAL WHERE dst = {a:String} ORDER BY block, tx_index, path LIMIT 5`, { a }),
-    rows<Edge>(`SELECT dst AS peer, ${EDGE_COLS} FROM native_edges_by_src FINAL WHERE src = {a:String} ORDER BY block, tx_index, path LIMIT 10`, { a }),
+    rows<Edge>(`SELECT src AS peer, ${EDGE_COLS} FROM native_edges WHERE dst = {a:String} ${FIRST} LIMIT 5`, { a }),
+    rows<Edge>(`SELECT dst AS peer, ${EDGE_COLS} FROM native_edges_by_src WHERE src = {a:String} ${FIRST} LIMIT 10`, { a }),
     rows<Side>(SIDE("agg_native_dst", "dst"), { a }),
     rows<Side>(SIDE("agg_native_src", "src"), { a }),
   ]);
@@ -335,7 +340,7 @@ async function fundingChain(a: string): Promise<{ hops: (Edge & { dst: string })
   const hops: (Edge & { dst: string })[] = [], seen = new Set([a]), labels = new Map<string, Label>(), hubs = new Map<string, number>();
   let end = "no earlier funder in our history";
   for (let at = a; ; ) {
-    const [e] = await rows<Edge>(`SELECT src AS peer, ${EDGE_COLS} FROM native_edges FINAL WHERE dst = {a:String} ORDER BY block, tx_index, path LIMIT 1`, { a: at });
+    const [e] = await rows<Edge>(`SELECT src AS peer, ${EDGE_COLS} FROM native_edges WHERE dst = {a:String} ${FIRST} LIMIT 1`, { a: at });
     if (!e) break;
     hops.push({ ...e, dst: at });
     const [[h], l] = await Promise.all([rows<{ w: number }>("SELECT uniqMerge(peers) AS w FROM agg_native_src WHERE src = {a:String}", { a: e.peer }), labelsOf([e.peer])]);
@@ -389,8 +394,9 @@ export async function address(rpc: Rpc, a: string, q: URLSearchParams): Promise<
     walletTxs(rpc, a, txb),
     txsFrom(),
     rows<{ tx_hash: string; block: string; token: string; from: string; to: string; amt: string; ts: number }>(
-      `SELECT tx_hash, block, token, \`from\`, \`to\`, toString(amount) AS amt, toUnixTimestamp(time) AS ts FROM kept_transfers_by_wallet FINAL
-       WHERE wallet = {a:String} ${tfb ? "AND block < {tfb:UInt64}" : ""} ORDER BY block DESC, log_index DESC LIMIT 25`, { a, tfb }),
+      `SELECT tx_hash, block, token, \`from\`, \`to\`, toString(amount) AS amt, toUnixTimestamp(time) AS ts FROM kept_transfers_by_wallet
+       WHERE wallet = {a:String} ${tfb ? "AND block < {tfb:UInt64}" : ""}
+       ORDER BY block DESC, log_index DESC, batch_index DESC, token DESC LIMIT 1 BY block, log_index, batch_index, token LIMIT 25`, { a, tfb }),
     funding(rpc, a),
   ]);
   const tok = meta.get(a), isContract = code !== "0x";
@@ -476,8 +482,11 @@ async function tokenSection(rpc: Rpc, t: string, tok: Token): Promise<Html> {
        ORDER BY sum(balance) DESC LIMIT 20`, { t, z: ZERO }),
     rows<{ pl: string; v: string; q: string; vol: number; raw: number; hk: string; vf: number }>(
       `SELECT n.pool AS pl, toString(p.venue) AS v, n.q AS q, n.nv AS vol, n.rv AS raw, p.hooks AS hk, p.verified AS vf
-       FROM (${NET24}) AS n INNER JOIN (SELECT * FROM pools FINAL) AS p ON p.pool = n.pool ORDER BY vol DESC, raw DESC LIMIT 10`, { t: [t] }),
-    rows<{ pool: string; hooks: string }>("SELECT pool, hooks FROM pools FINAL WHERE token0 = {t:String} OR token1 = {t:String}", { t }),
+       FROM (${NET24}) AS n INNER JOIN (SELECT * FROM pools FINAL PREWHERE pool IN (SELECT pool FROM (${NET24}))) AS p ON p.pool = n.pool
+       ORDER BY vol DESC, raw DESC LIMIT 10`, { t: [t] }),
+    // PREWHERE on columns fixed per pool, so FINAL merges only these pools, not all 1.34M (WETH, 2026-11-01: 2.6 → 1.1 s
+    // and 1.5 → 1.1 s, same rows)
+    rows<{ pool: string; hooks: string }>("SELECT pool, hooks FROM pools FINAL PREWHERE token0 = {t:String} OR token1 = {t:String}", { t }),
     earlyBuyers(upOf(rpc), t, EARLY_BLOCKS, 20).then((r) => (r.status === 200 ? r.body as Early : null)).catch(() => null),
   ]);
   const mp = card?.main_pool ?? null, d = card?.h24;
