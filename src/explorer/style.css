@@ -58,7 +58,8 @@ h2 .live { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px
 .live[data-state="paused"] { color: var(--muted); } .live[data-state="paused"] i { animation: none; }
 .live[data-state="off"] { color: var(--bad); }
 @keyframes pulse { 50% { opacity: .25; } }
-.feed { list-style: none; margin: 0; padding: 0; background: var(--card); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+/* rows go in at the top: a scroll anchor on a row scrolled the page down by a row at each one */
+.feed { overflow-anchor: none; list-style: none; margin: 0; padding: 0; background: var(--card); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .feed li { display: grid; gap: 4px 14px; align-items: center; min-height: 56px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .feed li:last-child { border-bottom: 0; }
 .feed li > div { min-width: 0; }

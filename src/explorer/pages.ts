@@ -62,7 +62,8 @@ export const notFound = (what: string): Page => ({ status: 404, title: "Not foun
 const WINDOWS = [60, 300, 900, 3600, 86400];
 
 /** Failed user txs in the last 5 minutes, from the same scan: bots' reverts keep it at ~15-25%, so elevated is against
- *  the day's share (from 1.5x), and degraded is over half of all txs failing. null below 300 txs. */
+ *  the median hour of the last day (from 1.5x; one bad hour doesn't move a median), and degraded is over half failing.
+ *  null below 300 txs. */
 export function failState(f5: number, n5: number, f24: number): { level: "normal" | "elevated" | "degraded"; ratio: number } | null {
   if (n5 < 300 || !(f24 > 0)) return null;
   const ratio = f5 / f24;
@@ -79,7 +80,7 @@ function stats(): Promise<Stats> {
 }
 async function computeStats(): Promise<Stats> {
   const T1 = "(SELECT max(time) FROM raw_blocks WHERE time > now() - INTERVAL 1 HOUR)";
-  const [bs, ts, [px]] = await Promise.all([
+  const [bs, ts, [px], [med]] = await Promise.all([
     rows<{ w: number; blocks: string; gas: string; bf: number; a: number; b: number }>(
       `SELECT w, count() AS blocks, sum(gas_used) AS gas, avg(base_fee) AS bf, toUnixTimestamp(min(time)) AS a, toUnixTimestamp(max(time)) AS b
        FROM raw_blocks ARRAY JOIN {ws:Array(UInt32)} AS w WHERE time > now() - INTERVAL 25 HOUR AND sign = 1 AND time > ${T1} - w
@@ -92,6 +93,9 @@ async function computeStats(): Promise<Stats> {
        GROUP BY w ORDER BY w`, { ws: WINDOWS }),
     rows<{ eth: number }>(`SELECT argMaxMerge(close_usd) AS eth FROM agg_candles_1m WHERE token = {z:String} AND minute > now() - INTERVAL 10 MINUTE
        GROUP BY pool ORDER BY sum(volume_usd) DESC LIMIT 1`, { z: ZERO }),
+    // the failed share's baseline: the median of the last 24 whole hours (agg_chain_hourly, 24 rows)
+    rows<{ f: number | null }>(`SELECT median(share) AS f FROM (SELECT hour, sum(failed) / sum(txs) AS share FROM agg_chain_hourly
+       WHERE hour >= toStartOfHour(now()) - INTERVAL 24 HOUR AND hour < toStartOfHour(now()) GROUP BY hour HAVING sum(txs) > 0)`),
   ]);
   const cols = WINDOWS.map((w) => {
     const b = bs.find((x) => x.w === w), t = ts.find((x) => x.w === w);
@@ -106,14 +110,14 @@ async function computeStats(): Promise<Stats> {
   const m1 = cols[0], m5 = cols[1], h1 = cols[3], d1 = cols[4];
   // the failed share of user txs (a block's internal tx never fails)
   const failed = (c: (typeof cols)[number]) => Number(c.t?.failed ?? 0) / Math.max(1, Number(c.t?.users ?? 0));
-  const fs = failState(failed(m5), Number(m5.t?.users ?? 0), failed(d1));
+  const base = Number(med?.f) || failed(d1), fs = failState(failed(m5), Number(m5.t?.users ?? 0), base);
   const tile = (v: unknown, k: string) => html`<div><b>${v}</b><span>${k}</span></div>`;
   const tiles = m1.b && m1.t && h1.b && h1.t ? html`${tile((m1.n / m1.span).toFixed(1), "tx/s, last minute")}
 ${tile(`${((m1.span / Number(m1.b.blocks)) * 1000).toFixed(0)} ms`, "block time")}
 ${tile(gwei(m1.t.gp50), "gas price (median)")}
 ${tile(ethUsd ? usd(ethUsd) : "?", "ETH price, on-chain")}
 ${tile(ethUsd ? usd(feeEth(h1.fees) * ethUsd) : `${feeEth(h1.fees).toFixed(3)} ETH`, "fees paid, last hour")}
-<div title="Failed user txs in the last 5 minutes${fs ? `, against ${(failed(d1) * 100).toFixed(1)}% over the last day` : ""}: normal below 1.5× the day's share, elevated from 1.5×, degraded over 50%"><b${fs ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min</span></div>` : html``;
+<div title="Failed user txs in the last 5 minutes${fs ? `, against ${(base * 100).toFixed(1)}% in the median hour of the last day` : ""}: normal below 1.5× that, elevated from 1.5×, degraded over 50%"><b${fs ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min</span></div>` : html``;
   return { tiles, table: html`<h2>Network <span class="muted small">(from our index; ETH ${ethUsd ? usd(ethUsd) : "?"} from on-chain pools)</span></h2>
 <div class="tw"><table class="stats-table"><tr><th></th>${cols.map((c) => html`<th>${label(c.w, c.span)}</th>`)}</tr>
 ${row("Transactions", (c) => c.n.toLocaleString("en-US"))}
