@@ -6,7 +6,7 @@ import type http from "node:http";
 import { CSS, CSS_PATH, html, JS, JS_PATH, page, REPO, type Html } from "./html.ts";
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
-import { address, block, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
+import { address, block, hint, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
 import { RANGES, type Range } from "./charts.ts";
 
 const SECURITY = {
@@ -43,6 +43,8 @@ export function route(path: string, qs: URLSearchParams): Route {
     if (path !== `/address/${a}` || (qs.size && `?${qs}` !== (p.size ? `?${p}` : ""))) return { redirect: canon };
     return { key: canon, ttl: 10, run: (rpc) => address(rpc, a, p) };
   }
+  m = path.match(/^\/hint\/(0x[0-9a-f]{40})$/);
+  if (m) return { key: path, ttl: 60, run: (rpc) => hint(rpc, m![1]) };
   if (path === "/search") {
     const q = (qs.get("q") ?? "").trim().slice(0, 100);
     return { key: `/search?q=${q}`, ttl: 60, q, run: (rpc) => search(rpc, q) };

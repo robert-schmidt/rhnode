@@ -27,10 +27,10 @@ test("compact", () => {
   assert.equal(compact(0n, 18), "0");
 });
 
-test("only the live home page loads the script, and keeps a no-script refresh", () => {
-  const p = page("x", html``, { refresh: 10, live: true });
+test("every page loads the script (the search hint); the live home page keeps a no-script refresh", () => {
+  const p = page("x", html``, { refresh: 10, live: true }), other = page("x", html``, { refresh: 10 });
   assert.ok(p.includes(`<script src="${JS_PATH}" defer>`) && p.includes('<noscript><meta http-equiv="refresh" content="10"></noscript>'));
-  assert.ok(!page("x", html``, { refresh: 10 }).includes("<script"));
+  assert.ok(other.includes(`<script src="${JS_PATH}" defer>`) && !other.includes("<noscript>"));
   assert.equal((route("/live", new URLSearchParams()) as { key: string }).key, "/live");
 });
 
@@ -73,10 +73,17 @@ test("push4s: dispatcher constants only (not PUSH4 bytes inside another push)", 
   assert.ok(!s.has("0x095ea7b3"));
 });
 
-test("failed txs, 5 min: graded against the day's share, nothing on a thin sample", () => {
+test("failed txs, 5 min: elevated against the day's share, degraded over half, nothing on a thin sample", () => {
   assert.equal(failState(0.2, 10_000, 0.15)?.level, "normal");
   assert.equal(failState(0.24, 10_000, 0.15)?.level, "elevated");
-  assert.equal(failState(0.3, 10_000, 0.15)?.level, "degraded");
+  assert.equal(failState(0.3, 10_000, 0.15)?.level, "elevated");
+  assert.equal(failState(0.51, 10_000, 0.4)?.level, "degraded");
   assert.equal(failState(0.9, 299, 0.15), null);
   assert.equal(failState(0.2, 10_000, 0), null);
+});
+
+test("the search hint route takes a whole lowercase address only", () => {
+  const r = route("/hint/0x" + "ab".repeat(20), new URLSearchParams());
+  assert.ok(r && "key" in r && r.key === "/hint/0x" + "ab".repeat(20));
+  for (const p of ["/hint/0x" + "AB".repeat(20), "/hint/0x1234", "/hint/" + XSS]) assert.equal(route(p, new URLSearchParams()), null);
 });

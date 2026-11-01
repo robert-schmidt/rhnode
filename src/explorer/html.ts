@@ -7,7 +7,8 @@ import { cfg } from "../config.ts";
 /** The stylesheet, served at a content-hashed URL so a new version never meets a cached old one. */
 export const CSS = readFileSync(new URL("./style.css", import.meta.url));
 export const CSS_PATH = `/static/style.${createHash("sha256").update(CSS).digest("hex").slice(0, 10)}.css`;
-/** The home page's live feed (live.js): polls /live and feeds new rows in at the top. The only script; pages work without it. */
+/** live.js, on every page: the search box's hint, and on the home page the live feed and the charts' readout. The only
+ *  script; pages work without it. */
 export const JS = readFileSync(new URL("./live.js", import.meta.url));
 export const JS_PATH = `/static/live.${createHash("sha256").update(JS).digest("hex").slice(0, 10)}.js`;
 
@@ -35,7 +36,7 @@ export function page(title: string, body: Html, opts: { q?: string; refresh?: nu
   const refresh = opts.refresh ? html`<meta http-equiv="refresh" content="${opts.refresh}">` : "";
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.live ? html`<noscript>${refresh}</noscript>` : refresh}
-<title>${title} · Robinhood Chain Explorer</title><link rel="stylesheet" href="${CSS_PATH}">${opts.live ? html`<script src="${JS_PATH}" defer></script>` : ""}
+<title>${title} · Robinhood Chain Explorer</title><link rel="stylesheet" href="${CSS_PATH}"><script src="${JS_PATH}" defer></script>
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
 <body><header><div class="bar"><a class="brand" href="/">Robinhood <span>Chain</span> Explorer</a>
 <form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off" enterkeyhint="search"><button>Search</button></form></div></header>

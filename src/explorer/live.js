@@ -2,6 +2,48 @@
 // ones it shows (data-o: block, or block and tx index) in at the top, spread over the poll interval so the list moves like the chain does. Pointing at a list (or focusing
 // into it) pauses it; a hidden tab doesn't poll. Without this script the page refreshes itself (<noscript>).
 "use strict";
+// The search box: what the text is (a block, a tx, an address, a token's name) as it's typed or pasted, in a box under it.
+// Only an address asks the server (/hint/<address>, cached 60 s), whether it's a token, a contract or a wallet.
+(() => {
+  const form = document.querySelector("header form[role=search]"), input = form && form.querySelector("input");
+  if (!input) return;
+  const box = document.createElement("div");
+  box.className = "hint"; box.hidden = true;
+  form.append(box);
+  const item = (href, kind, label) => {
+    const a = document.createElement("a"), t = document.createElement("span");
+    a.href = href; t.className = "tag"; t.textContent = kind;
+    a.append(t, " ", label);
+    return a;
+  };
+  const put = (el) => { box.replaceChildren(...(el ? [el] : [])); box.hidden = !el; };
+  let seq = 0;
+  const update = async () => {
+    const s = input.value.trim(), my = ++seq;
+    if (/^\d{1,12}$/.test(s)) return put(item(`/block/${Number(s)}`, "Block", `#${Number(s).toLocaleString("en-US")}`));
+    if (/^0x[0-9a-f]{64}$/i.test(s)) return put(item(`/search?q=${s.toLowerCase()}`, "Transaction", `${s.slice(0, 10)}…${s.slice(-8)}`));
+    if (/^0x[0-9a-f]{40}$/i.test(s)) {
+      const a = s.toLowerCase();
+      put(item(`/address/${a}`, "Address", `${a.slice(0, 8)}…${a.slice(-6)}`));
+      try {
+        const r = await fetch(`/hint/${a}`, { credentials: "same-origin" });
+        const got = r.ok && !r.redirected && new DOMParser().parseFromString(await r.text(), "text/html").body.firstElementChild;
+        if (got && my === seq) put(document.importNode(got, true));
+      } catch { /* the plain address link stays */ }
+      return;
+    }
+    put(s.length >= 2 && !/^0x[0-9a-f]*$/i.test(s) ? item(`/search?q=${encodeURIComponent(s)}`, "Token", `named “${s}”`) : null);
+  };
+  input.addEventListener("input", update);
+  input.addEventListener("focus", update);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") box.hidden = true;
+    if (e.key === "ArrowDown" && !box.hidden) { e.preventDefault(); box.querySelector("a")?.focus(); }
+  });
+  box.addEventListener("keydown", (e) => { if (e.key === "ArrowUp" || e.key === "Escape") { e.preventDefault(); input.focus(); } });
+  form.addEventListener("focusout", () => setTimeout(() => { if (!form.contains(document.activeElement)) box.hidden = true; }, 150));
+})();
+
 // Chain charts (charts.ts): a crosshair and readout at the nearest point on hover, or on keyboard focus with the arrow
 // keys. Values go in with textContent; the table under each chart has them all without this.
 (() => {

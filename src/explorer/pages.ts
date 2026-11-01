@@ -61,12 +61,12 @@ export const notFound = (what: string): Page => ({ status: 404, title: "Not foun
 // Network numbers over the last minute, 5 and 15 minutes, hour and day; ~0.4 s of ClickHouse, so computed at most every 15 s.
 const WINDOWS = [60, 300, 900, 3600, 86400];
 
-/** Failed user txs in the last 5 minutes against the day's share, from the same scan: bots' reverts keep it at ~15-25%,
- *  so the day is the baseline. null below 300 txs. */
+/** Failed user txs in the last 5 minutes, from the same scan: bots' reverts keep it at ~15-25%, so elevated is against
+ *  the day's share (from 1.5x), and degraded is over half of all txs failing. null below 300 txs. */
 export function failState(f5: number, n5: number, f24: number): { level: "normal" | "elevated" | "degraded"; ratio: number } | null {
   if (n5 < 300 || !(f24 > 0)) return null;
   const ratio = f5 / f24;
-  return { level: ratio >= 2 ? "degraded" : ratio >= 1.5 ? "elevated" : "normal", ratio };
+  return { level: f5 > 0.5 ? "degraded" : ratio >= 1.5 ? "elevated" : "normal", ratio };
 }
 type Stats = { table: Html; tiles: Html };
 let statsMemo: { at: number; p: Promise<Stats> } | null = null;
@@ -113,7 +113,7 @@ ${tile(`${((m1.span / Number(m1.b.blocks)) * 1000).toFixed(0)} ms`, "block time"
 ${tile(gwei(m1.t.gp50), "gas price (median)")}
 ${tile(ethUsd ? usd(ethUsd) : "?", "ETH price, on-chain")}
 ${tile(ethUsd ? usd(feeEth(h1.fees) * ethUsd) : `${feeEth(h1.fees).toFixed(3)} ETH`, "fees paid, last hour")}
-<div title="Failed user txs in the last 5 minutes${fs ? `, against ${(failed(d1) * 100).toFixed(1)}% over the last day` : ""}: normal below 1.5× the day's share, elevated from 1.5×, degraded from 2×"><b${fs && fs.level !== "normal" ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min</span></div>` : html``;
+<div title="Failed user txs in the last 5 minutes${fs ? `, against ${(failed(d1) * 100).toFixed(1)}% over the last day` : ""}: normal below 1.5× the day's share, elevated from 1.5×, degraded over 50%"><b${fs ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min</span></div>` : html``;
   return { tiles, table: html`<h2>Network <span class="muted small">(from our index; ETH ${ethUsd ? usd(ethUsd) : "?"} from on-chain pools)</span></h2>
 <div class="tw"><table class="stats-table"><tr><th></th>${cols.map((c) => html`<th>${label(c.w, c.span)}</th>`)}</tr>
 ${row("Transactions", (c) => c.n.toLocaleString("en-US"))}
@@ -539,6 +539,17 @@ ${e.buyers.map((b) => html`<tr><td>${link("tx", b.tx_hash, String(b.rank))}</td>
 }
 
 // --- search ---
+
+/** The search box's hint for a pasted address (live.js; the other kinds it tells by their shape): a token, a contract or a
+ *  wallet, from one serve_tokens point read and one eth_getCode. */
+export async function hint(rpc: Rpc, a: string): Promise<Page> {
+  const [[t], code] = await Promise.all([
+    rows<{ name: string; symbol: string }>("SELECT name, symbol FROM serve_tokens FINAL WHERE token = {a:String}", { a }),
+    call<string>(rpc, "eth_getCode", [a, "latest"]).catch(() => "0x"),
+  ]);
+  const kind = t ? "Token" : code && code !== "0x" ? "Contract" : "Wallet";
+  return { status: 200, title: "", fragment: true, body: html`<a href="/address/${a}"><span class="tag">${kind}</span> ${t ? html`${t.symbol || short(a)} <span class="muted">${t.name}</span>` : short(a)}</a>` };
+}
 
 export async function search(rpc: Rpc, q: string): Promise<Page> {
   const s = q.trim();
