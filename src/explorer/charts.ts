@@ -7,21 +7,21 @@ import { html, type Html } from "./html.ts";
 export const RANGES = { "24h": { label: "24 hours", secs: 86_400 }, "7d": { label: "7 days", secs: 7 * 86_400 }, all: { label: "All time", secs: 0 } } as const;
 export type Range = keyof typeof RANGES;
 
-export type Bucket = { t: number; secs: number; blocks: number; gas: number; bf: number; txs: number; head: number; failed: number; fees: number; gp: number[]; senders: number };
+export type Bucket = { t: number; secs: number; blocks: number; gas: number; bf: number; txs: number; head: number; det: number; failed: number; fees: number; gp: number[]; senders: number };
 
 async function load(range: Range): Promise<{ step: number; b: Bucket[] }> {
   const secs = RANGES[range].secs;
   const [span] = await rows<{ a: number; z: number }>("SELECT toUnixTimestamp(min(hour)) AS a, toUnixTimestamp(max(hour)) AS z FROM agg_chain_hourly WHERE blocks != 0 OR txs != 0");
   const from = secs ? Math.max(Number(span?.a ?? 0), Math.floor(Date.now() / 1000) - secs) : Number(span?.a ?? 0);
   const step = Number(span?.z ?? 0) - from > 21 * 86_400 ? 86_400 : 3_600; // hourly up to 3 weeks, then daily
-  const r = await rows<{ t: number; a: number | null; z: number | null; n_blocks: string; n_gas: string; n_bf: string; n_txs: string; n_head: string; n_failed: string; n_fees: string; gp: number[]; n_senders: string }>(
+  const r = await rows<{ t: number; a: number | null; z: number | null; n_blocks: string; n_gas: string; n_bf: string; n_txs: string; n_head: string; n_det: string; n_failed: string; n_fees: string; gp: number[]; n_senders: string }>(
     `SELECT toUnixTimestamp(toStartOfInterval(hour, toIntervalSecond({step:UInt32}))) AS t, toUnixTimestamp(min(t0)) AS a, toUnixTimestamp(max(t1)) AS z,
-       sum(blocks) AS n_blocks, sum(gas_used) AS n_gas, sum(base_fee_sum) AS n_bf, sum(txs) AS n_txs, sum(head_txs) AS n_head, sum(failed) AS n_failed,
+       sum(blocks) AS n_blocks, sum(gas_used) AS n_gas, sum(base_fee_sum) AS n_bf, sum(txs) AS n_txs, sum(head_txs) AS n_head, sum(det_txs) AS n_det, sum(failed) AS n_failed,
        toString(sum(fees)) AS n_fees, quantilesTDigestMerge(0.1, 0.5, 0.9)(gas_price) AS gp, uniqMerge(senders) AS n_senders
      FROM agg_chain_hourly WHERE hour >= toDateTime({from:UInt32}) GROUP BY t HAVING n_blocks > 0 ORDER BY t`, { step, from });
   return { step, b: r.map((x) => ({
     t: x.t, secs: x.a != null && x.z != null ? Math.max(1, Math.min(step, x.z - x.a + 1)) : step, blocks: Number(x.n_blocks), gas: Number(x.n_gas),
-    bf: Number(x.n_bf), txs: Number(x.n_txs), head: Number(x.n_head), failed: Number(x.n_failed), fees: Number(BigInt(x.n_fees)) / 1e18, gp: x.gp, senders: Number(x.n_senders),
+    bf: Number(x.n_bf), txs: Number(x.n_txs), head: Number(x.n_head), det: Number(x.n_det), failed: Number(x.n_failed), fees: Number(BigInt(x.n_fees)) / 1e18, gp: x.gp, senders: Number(x.n_senders),
   })) };
 }
 
@@ -68,9 +68,10 @@ function timeTicks(a: number, z: number): { t: number; label: string }[] {
 type Series = { title: string; note: string; v: (b: Bucket) => number; fmt: (v: number) => string; tick?: (v: number) => string; band?: (b: Bucket) => [number, number]; zero: boolean; detail?: true; total?: true };
 
 function plot(s: Series, b: Bucket[], step: number): Html {
-  // senders and failures need the txs themselves: only hours with none from headers (before go-live, migration 028);
+  // senders and failures need the txs themselves: before go-live only once their details cover the headers' count
+  // (migration 029; head_txs counts the odd extra internal tx too, ~0.04%);
   // a total (senders, fees) only over a whole hour or day, or the one still filling looks like a collapse
-  const pts = b.filter((x) => (!s.detail || x.head === 0) && (!s.total || x.secs >= step * 0.98)).map((x) => ({ t: x.t, v: s.v(x), band: s.band?.(x) }));
+  const pts = b.filter((x) => (!s.detail || x.det >= x.head * 0.995) && (!s.total || x.secs >= step * 0.98)).map((x) => ({ t: x.t, v: s.v(x), band: s.band?.(x) }));
   const t0 = b[0].t, t1 = b.at(-1)!.t;
   if (!pts.length) return html``;
   const vals = pts.flatMap((p) => (p.band ? [p.v, ...p.band] : [p.v])).filter(Number.isFinite);
@@ -115,9 +116,9 @@ export function render(range: Range, step: number, b: Bucket[]): Html {
     { title: "Active senders", note: `distinct senders per ${per(step)}`, v: (x) => x.senders, fmt: compactN, zero: true, detail: true, total: true },
     { title: "Gas used", note: "Mgas per second", v: (x) => x.gas / x.secs / 1e6, fmt: num(1), zero: true },
     { title: "Fees paid", note: `ETH per ${per(step)}`, v: (x) => x.fees, total: true, fmt: (v) => `${v.toPrecision(3)} ETH`, tick: (v) => `${+v.toPrecision(3)}`, zero: true },
-    { title: "Failed transactions", note: "share of user txs", v: (x) => (x.txs ? (x.failed / x.txs) * 100 : 0), fmt: (v) => `${v.toFixed(1)}%`, zero: true, detail: true },
+    { title: "Failed transactions", note: "share of user txs", v: (x) => (x.txs + x.det ? (x.failed / (x.txs + x.det)) * 100 : 0), fmt: (v) => `${v.toFixed(1)}%`, zero: true, detail: true },
   ];
   return html`<section id="chain"><h2>Chain over time</h2>${nav}
 <div class="charts">${series.map((s) => plot(s, b, step))}</div>
-<p class="muted small">From our node and index, ${step >= DAY ? "per day" : "per hour"} (UTC); the last point is still filling. Before go-live (Oct 29) from block headers, so senders and failures start there.</p></section>`;
+<p class="muted small">From our node and index, ${step >= DAY ? "per day" : "per hour"} (UTC); the last point is still filling. Before go-live (Oct 29), senders and failures fill in as our background passes read each block's receipts.</p></section>`;
 }

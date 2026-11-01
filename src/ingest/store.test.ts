@@ -152,6 +152,16 @@ test("agg_chain_hourly from headers (028): user txs as tx_count - 1, fees at the
     { n_blocks: 2, n_head: 3, n_txs: 0, n_fees: 9000, gp: [10, 10, 10] }); // block 51 has only its internal tx: no gas price
 });
 
+test("agg_chain_hourly details before go-live (029): the history pass below 51.5M, the gap pass from it; neither counts the other's side", { skip }, async () => {
+  const time = "2026-06-01 03:10:00", A = (c: string) => "0x" + c.repeat(40);
+  const tx = (block: number, i: number, from: string, status: number, type = 2) => ({ block, tx_index: i, time, from, type, status, created: "", sign: 1 });
+  await insert("hist_txs", [tx(51_499_999, 0, A("1"), 1, 106), tx(51_499_999, 1, A("1"), 0), tx(51_499_999, 2, A("2"), 1), tx(51_500_000, 1, A("3"), 0)], "t-029-hist");
+  await insert("hist_chain_txs", [tx(51_500_000, 1, A("3"), 0), tx(51_500_000, 2, A("3"), 1), tx(51_499_999, 1, A("1"), 0)], "t-029-gap");
+  const [h] = await rows<Record<string, string | number>>(`SELECT sum(det_txs) AS n_det, sum(failed) AS n_failed, uniqMerge(senders) AS n_senders, sum(txs) AS n_txs
+    FROM agg_chain_hourly WHERE hour = '2026-06-01 03:00:00'`);
+  assert.deepEqual(Object.fromEntries(Object.entries(h).map(([k, v]) => [k, Number(v)])), { n_det: 4, n_failed: 2, n_senders: 3, n_txs: 0 });
+});
+
 test("findFork: the highest block whose stored hash matches the chain, skipping blocks no longer stored", async () => {
   const stored: Record<number, string> = { 98: "a", 99: "b", 100: "x" }; // 101 was already deleted
   const chain: Record<number, string> = { 98: "a", 99: "b", 100: "c", 101: "d" };
