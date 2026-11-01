@@ -65,20 +65,21 @@ function timeTicks(a: number, z: number): { t: number; label: string }[] {
   return out;
 }
 
-type Series = { title: string; note: string; v: (b: Bucket) => number; fmt: (v: number) => string; tick?: (v: number) => string; band?: (b: Bucket) => [number, number]; zero: boolean; detail?: true };
+type Series = { title: string; note: string; v: (b: Bucket) => number; fmt: (v: number) => string; tick?: (v: number) => string; band?: (b: Bucket) => [number, number]; zero: boolean; detail?: true; total?: true };
 
 function plot(s: Series, b: Bucket[], step: number): Html {
-  // senders and failures need the txs themselves: only hours with none from headers (before go-live, migration 028)
-  const pts = b.filter((x) => !s.detail || x.head === 0).map((x) => ({ t: x.t, v: s.v(x), band: s.band?.(x) }));
+  // senders and failures need the txs themselves: only hours with none from headers (before go-live, migration 028);
+  // a total (senders, fees) only over a whole hour or day, or the one still filling looks like a collapse
+  const pts = b.filter((x) => (!s.detail || x.head === 0) && (!s.total || x.secs >= step * 0.98)).map((x) => ({ t: x.t, v: s.v(x), band: s.band?.(x) }));
   const t0 = b[0].t, t1 = b.at(-1)!.t;
   if (!pts.length) return html``;
   const vals = pts.flatMap((p) => (p.band ? [p.v, ...p.band] : [p.v])).filter(Number.isFinite);
-  const lo0 = s.zero ? 0 : Math.min(...vals), hi0 = Math.max(...vals);
+  const lo0 = s.zero ? 0 : Math.min(...vals), hi0 = Math.max(...vals), p0 = pts[0].t;
   const pad = s.zero ? 0 : (hi0 - lo0 || hi0 * 0.01 || 1) * 0.15;
-  const ys = ticks(s.zero ? 0 : lo0 - pad, hi0 + pad), lo = ys[0], hi = ys.at(-1)!;
+  const ys = ticks(s.zero ? 0 : Math.max(lo0 >= 0 ? 0 : -Infinity, lo0 - pad), hi0 + pad), lo = ys[0], hi = ys.at(-1)!;
   const x = (t: number) => L + ((t - t0) / (t1 - t0 || 1)) * (W - L - R), y = (v: number) => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B);
   const line = pts.map((p, i) => `${i ? "L" : "M"}${fix(x(p.t))},${fix(y(p.v))}`).join("");
-  const area = s.zero ? `${line}L${fix(x(t1))},${fix(y(lo))}L${fix(x(t0))},${fix(y(lo))}Z` : "";
+  const area = s.zero ? `${line}L${fix(x(pts.at(-1)!.t))},${fix(y(lo))}L${fix(x(p0))},${fix(y(lo))}Z` : "";
   const band = s.band ? pts.map((p, i) => `${i ? "L" : "M"}${fix(x(p.t))},${fix(y(p.band![1]))}`).join("")
     + pts.slice().reverse().map((p) => `L${fix(x(p.t))},${fix(y(p.band![0]))}`).join("") + "Z" : "";
   const when = (t: number) => (step >= DAY ? dayLabel(t) : `${dayLabel(t)} ${hourLabel(t)} UTC`);
@@ -111,9 +112,9 @@ export function render(range: Range, step: number, b: Bucket[]): Html {
   const series: Series[] = [
     { title: "Transactions per second", note: `average per ${per(step)}`, v: (x) => (x.txs + x.head) / x.secs, fmt: num(1), zero: true },
     { title: "Gas price", note: "gwei, median paid; band: p10 – p90", v: (x) => x.gp[1] / 1e9, band: (x) => [x.gp[0] / 1e9, x.gp[2] / 1e9], fmt: gwei, tick: (v) => `${+v.toPrecision(4)}`, zero: false },
-    { title: "Active senders", note: `distinct senders per ${per(step)}`, v: (x) => x.senders, fmt: compactN, zero: true, detail: true },
+    { title: "Active senders", note: `distinct senders per ${per(step)}`, v: (x) => x.senders, fmt: compactN, zero: true, detail: true, total: true },
     { title: "Gas used", note: "Mgas per second", v: (x) => x.gas / x.secs / 1e6, fmt: num(1), zero: true },
-    { title: "Fees paid", note: `ETH per ${per(step)}`, v: (x) => x.fees, fmt: (v) => `${v.toPrecision(3)} ETH`, tick: (v) => `${+v.toPrecision(3)}`, zero: true },
+    { title: "Fees paid", note: `ETH per ${per(step)}`, v: (x) => x.fees, total: true, fmt: (v) => `${v.toPrecision(3)} ETH`, tick: (v) => `${+v.toPrecision(3)}`, zero: true },
     { title: "Failed transactions", note: "share of user txs", v: (x) => (x.txs ? (x.failed / x.txs) * 100 : 0), fmt: (v) => `${v.toFixed(1)}%`, zero: true, detail: true },
   ];
   return html`<section id="chain"><h2>Chain over time</h2>${nav}
