@@ -75,12 +75,19 @@ export function balances(ts: Transfer[], skip: Set<string>): { token: string; ho
   return [...bal].filter(([, b]) => b !== 0n).map(([k, b]) => ({ token: k.slice(0, 42), holder: k.slice(42), balance: b.toString() }));
 }
 
-async function batch<T>(node: string, method: string, from: number, to: number, params: (n: number) => unknown[]): Promise<T[]> {
+export async function batch<T>(node: string, method: string, from: number, to: number, params: (n: number) => unknown[]): Promise<T[]> {
   const req = [];
   for (let n = from; n <= to; n++) req.push({ jsonrpc: "2.0", id: n, method, params: params(n) });
-  const r = await fetch(node, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req), signal: AbortSignal.timeout(120_000) });
-  const j = (await r.json()) as { result?: T; error?: { message: string } }[];
+  // one block goes unbatched: Nitro caps a batch's whole response (geth's rpc.batch-response-max-size, 25 MB), not a call's
+  const r = await fetch(node, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(from === to ? req[0] : req), signal: AbortSignal.timeout(120_000) });
+  const raw = (await r.json()) as unknown;
+  const j = (from === to && !Array.isArray(raw) ? [raw] : raw) as { result?: T; error?: { message: string } }[];
   const bad = Array.isArray(j) ? j.find((x) => !x.result) : null;
+  // A run of heavy blocks over the cap halves until each part fits (stalled the pass at 48,726,160–169, 2026-11-01).
+  if (from < to && /too large/.test(bad?.error?.message ?? "")) {
+    const m = Math.floor((from + to) / 2);
+    return [...await batch<T>(node, method, from, m, params), ...await batch<T>(node, method, m + 1, to, params)];
+  }
   if (!Array.isArray(j) || bad) throw new Error(`${method} ${from}-${to}: ${bad?.error?.message ?? `HTTP ${r.status}`}`);
   return j.map((x) => x.result!);
 }
