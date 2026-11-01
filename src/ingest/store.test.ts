@@ -134,9 +134,10 @@ test("agg_chain_hourly: blocks and user txs per hour; a rollback's rows take the
     { block: 900, tx_index: 1, hash: H("4"), time, from: A("2"), type: 2, status: 1, gas_used: 10, effective_gas_price: 20, created: A("9"), sign: 1 },
     { block: 900, tx_index: 2, hash: H("5"), time, from: A("2"), type: 2, status: 0, gas_used: 5, effective_gas_price: 20, sign: 1 }], "t-hourly-txs");
   await insert("raw_blocks", [{ number: 901, hash: H("2"), time, tx_count: 1, gas_used: 500, base_fee: 30, sign: -1 }], "t-hourly-rollback");
-  const [h] = await rows<Record<string, string | number>>(`SELECT toString(min(t0)) AS t0, toString(max(t1)) AS t1, sum(blocks) AS blocks, sum(gas_used) AS gas, sum(base_fee_sum) AS bf, sum(txs) AS txs,
-    sum(failed) AS failed, sum(creates) AS creates, toString(sum(fees)) AS fees, uniqMerge(senders) AS senders FROM agg_chain_hourly WHERE hour = '2026-11-01 05:00:00'`);
-  assert.deepEqual(h, { t0: time, t1: time, blocks: "1", gas: "1000", bf: "20", txs: "2", failed: "1", creates: "1", fees: "300", senders: "1" });
+  const [h] = await rows<Record<string, string | number>>(`SELECT toString(min(t0)) AS a, toString(max(t1)) AS z, sum(blocks) AS n_blocks, sum(gas_used) AS n_gas, sum(base_fee_sum) AS n_bf,
+    sum(txs) AS n_txs, sum(failed) AS n_failed, sum(creates) AS n_creates, toString(sum(fees)) AS n_fees, uniqMerge(senders) AS n_senders FROM agg_chain_hourly WHERE hour = '2026-11-01 05:00:00'`);
+  assert.deepEqual(Object.fromEntries(Object.entries(h).map(([k, v]) => [k, k === "a" || k === "z" ? v : Number(v)])),
+    { a: time, z: time, n_blocks: 1, n_gas: 1000, n_bf: 20, n_txs: 2, n_failed: 1, n_creates: 1, n_fees: 300, n_senders: 1 });
 });
 
 test("findFork: the highest block whose stored hash matches the chain, skipping blocks no longer stored", async () => {
