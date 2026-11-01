@@ -1,12 +1,13 @@
 // One-off for migration 028 (2026-11-01): the explorer's "Chain over time" before go-live, from block headers. From
 // go-live down to genesis, newest first, in 10,000-block chunks on a fixed grid; its floor is ctl_cursors 'hourly', and a
 // retried chunk carries the same dedup token. Waits while ingest (or the tracer) trails our node, as the history pass does.
-// Measured 2026-11-01: ~1,700 headers/s at 4 in flight beside the history pass, so ~17 h for 101M blocks.
-// `docker compose run -d --name rhnode-hourly-fill promoter node src/tools/chain-hourly-fill.ts [par]`
+// Measured 2026-11-01 beside the history pass: 2 in flight read ~1,550 headers/s and left the pass at its pace; 4 read
+// ~1,400/s and slowed the pass from ~133 to ~83 blocks/s. So 2: ~18 h for 101M blocks.
+// `docker compose run -d --name rhnode-hourly-fill promoter node src/tools/chain-hourly-fill.ts [par]` (`docker start` it again after a stop: it resumes)
 import { ch, insert, rows } from "../ch.ts";
 
 const node = process.env.NITRO_HTTP!;
-const STEP = 10_000, BATCH = 100, PAR = Number(process.argv[2] ?? 4), MAX_LAG = 50;
+const STEP = 10_000, BATCH = 100, PAR = Number(process.argv[2] ?? 2), MAX_LAG = 50;
 const hex = (n: number) => "0x" + n.toString(16);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const cursor = async (n: string) => (await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = {n:String}", { n }))[0]?.block;
