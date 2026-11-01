@@ -1,5 +1,5 @@
-:root { --chart: #0b7a4b; --bg: #fafaf7; --fg: #1b1d1f; --muted: #6b7075; --line: #e3e3dd; --card: #fff; --acc: #0b7a4b; --bad: #b3261e; --tag: #eef3ef; }
-@media (prefers-color-scheme: dark) { :root { --chart: #36a372; --bg: #111314; --fg: #e6e7e8; --muted: #93999e; --line: #2a2e31; --card: #181b1d; --acc: #4cc38a; --bad: #ff7b72; --tag: #1f2a24; } }
+:root { --warn: #9a6700; --chart: #0b7a4b; --bg: #fafaf7; --fg: #1b1d1f; --muted: #6b7075; --line: #e3e3dd; --card: #fff; --acc: #0b7a4b; --bad: #b3261e; --tag: #eef3ef; }
+@media (prefers-color-scheme: dark) { :root { --warn: #d29922; --chart: #36a372; --bg: #111314; --fg: #e6e7e8; --muted: #93999e; --line: #2a2e31; --card: #181b1d; --acc: #4cc38a; --bad: #ff7b72; --tag: #1f2a24; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 a { color: var(--acc); text-decoration: none; } a:hover { text-decoration: underline; }
@@ -43,7 +43,7 @@ main form.row { display: flex; gap: 6px; max-width: 560px; } main form.inline { 
 .token { font-size: 15px; padding: 8px; background: var(--tag); border-radius: 4px; user-select: all; }
 table.stats-table th:first-child { color: var(--fg); font-weight: 500; } table.stats-table td, table.stats-table th:not(:first-child) { text-align: right; } table.stats-table td { font-variant-numeric: tabular-nums; }
 @media (max-width: 600px) { header form { max-width: none; flex-basis: 100%; } main { padding: 12px; } th, td { padding: 5px 7px; } dl { grid-template-columns: 1fr; } dt { margin-top: 6px; } }
-.stats b a { font-size: inherit; font-family: inherit; }
+.stats b a { font-size: inherit; font-family: inherit; } .stats b.elevated { color: var(--warn); } .stats b.degraded { color: var(--bad); }
 .loading { display: flex; gap: .6em; align-items: center; padding: .7em 1em; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--muted); }
 .spin { flex: none; width: 1em; height: 1em; border: 2px solid var(--line); border-top-color: var(--acc); border-radius: 50%; animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { compact, html, JS_PATH, page, units } from "./html.ts";
 import { route } from "./index.ts";
+import { failState } from "./pages.ts";
 
 const XSS = `"><script>alert(1)</script><img src=x onerror=alert(1)>`;
 
@@ -70,4 +71,12 @@ test("push4s: dispatcher constants only (not PUSH4 bytes inside another push)", 
   const s = push4s("0x63a9059cbb14" + "7f" + "63095ea7b3".padEnd(64, "0") + "00");
   assert.ok(s.has("0xa9059cbb"));
   assert.ok(!s.has("0x095ea7b3"));
+});
+
+test("failed txs, 5 min: graded against the day's share, nothing on a thin sample", () => {
+  assert.equal(failState(0.2, 10_000, 0.15)?.level, "normal");
+  assert.equal(failState(0.24, 10_000, 0.15)?.level, "elevated");
+  assert.equal(failState(0.3, 10_000, 0.15)?.level, "degraded");
+  assert.equal(failState(0.9, 299, 0.15), null);
+  assert.equal(failState(0.2, 10_000, 0), null);
 });

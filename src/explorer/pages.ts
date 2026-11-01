@@ -58,8 +58,16 @@ export const notFound = (what: string): Page => ({ status: 404, title: "Not foun
 
 // --- home ---
 
-// Network numbers over the last minute, 15 minutes, hour and day; ~0.4 s of ClickHouse, so computed at most every 15 s.
-const WINDOWS = [60, 900, 3600, 86400];
+// Network numbers over the last minute, 5 and 15 minutes, hour and day; ~0.4 s of ClickHouse, so computed at most every 15 s.
+const WINDOWS = [60, 300, 900, 3600, 86400];
+
+/** Failed user txs in the last 5 minutes against the day's share, from the same scan: bots' reverts keep it at ~15-25%,
+ *  so the day is the baseline. null below 300 txs. */
+export function failState(f5: number, n5: number, f24: number): { level: "normal" | "elevated" | "degraded"; ratio: number } | null {
+  if (n5 < 300 || !(f24 > 0)) return null;
+  const ratio = f5 / f24;
+  return { level: ratio >= 2 ? "degraded" : ratio >= 1.5 ? "elevated" : "normal", ratio };
+}
 type Stats = { table: Html; tiles: Html };
 let statsMemo: { at: number; p: Promise<Stats> } | null = null;
 function stats(): Promise<Stats> {
@@ -76,8 +84,8 @@ async function computeStats(): Promise<Stats> {
       `SELECT w, count() AS blocks, sum(gas_used) AS gas, avg(base_fee) AS bf, toUnixTimestamp(min(time)) AS a, toUnixTimestamp(max(time)) AS b
        FROM raw_blocks ARRAY JOIN {ws:Array(UInt32)} AS w WHERE time > now() - INTERVAL 25 HOUR AND sign = 1 AND time > ${T1} - w
        GROUP BY w ORDER BY w`, { ws: WINDOWS }),
-    rows<{ w: number; n: string; failed: string; senders: string; creates: string; gp50: number; gp90: number; fees: string }>(
-      `SELECT w, count() AS n, countIf(status = 0 AND type != 106) AS failed, uniq(\`from\`) AS senders, countIf(created != '') AS creates,
+    rows<{ w: number; n: string; users: string; failed: string; senders: string; creates: string; gp50: number; gp90: number; fees: string }>(
+      `SELECT w, count() AS n, countIf(type != 106) AS users, countIf(status = 0 AND type != 106) AS failed, uniq(\`from\`) AS senders, countIf(created != '') AS creates,
          quantileIf(0.5)(effective_gas_price, type != 106) AS gp50, quantileIf(0.9)(effective_gas_price, type != 106) AS gp90,
          toString(sum(toUInt256(gas_used) * effective_gas_price)) AS fees
        FROM raw_txs ARRAY JOIN {ws:Array(UInt32)} AS w WHERE time > now() - INTERVAL 25 HOUR AND sign = 1 AND time > ${T1} - w
@@ -95,13 +103,17 @@ async function computeStats(): Promise<Stats> {
   const ethUsd = px?.eth ?? 0;
   const feeEth = (wei: bigint) => Number(wei) / 1e18;
   const row = (name: string, f: (c: (typeof cols)[number]) => unknown) => html`<tr><th>${name}</th>${cols.map((c) => html`<td>${c.b && c.t ? f(c) : "—"}</td>`)}</tr>`;
-  const m1 = cols[0], h1 = cols[2];
+  const m1 = cols[0], m5 = cols[1], h1 = cols[3], d1 = cols[4];
+  // the failed share of user txs (a block's internal tx never fails)
+  const failed = (c: (typeof cols)[number]) => Number(c.t?.failed ?? 0) / Math.max(1, Number(c.t?.users ?? 0));
+  const fs = failState(failed(m5), Number(m5.t?.users ?? 0), failed(d1));
   const tile = (v: unknown, k: string) => html`<div><b>${v}</b><span>${k}</span></div>`;
   const tiles = m1.b && m1.t && h1.b && h1.t ? html`${tile((m1.n / m1.span).toFixed(1), "tx/s, last minute")}
 ${tile(`${((m1.span / Number(m1.b.blocks)) * 1000).toFixed(0)} ms`, "block time")}
 ${tile(gwei(m1.t.gp50), "gas price (median)")}
 ${tile(ethUsd ? usd(ethUsd) : "?", "ETH price, on-chain")}
-${tile(ethUsd ? usd(feeEth(h1.fees) * ethUsd) : `${feeEth(h1.fees).toFixed(3)} ETH`, "fees paid, last hour")}` : html``;
+${tile(ethUsd ? usd(feeEth(h1.fees) * ethUsd) : `${feeEth(h1.fees).toFixed(3)} ETH`, "fees paid, last hour")}
+<div title="Failed user txs in the last 5 minutes; normal below 1.5× the last day's share, degraded from 2×"><b${fs && fs.level !== "normal" ? html` class="${fs.level}"` : ""}>${fs ? `${(failed(m5) * 100).toFixed(1)}% · ${fs.level}` : "—"}</b><span>failed txs, 5 min${fs ? ` (day: ${(failed(d1) * 100).toFixed(1)}%)` : ""}</span></div>` : html``;
   return { tiles, table: html`<h2>Network <span class="muted small">(from our index; ETH ${ethUsd ? usd(ethUsd) : "?"} from on-chain pools)</span></h2>
 <div class="tw"><table class="stats-table"><tr><th></th>${cols.map((c) => html`<th>${label(c.w, c.span)}</th>`)}</tr>
 ${row("Transactions", (c) => c.n.toLocaleString("en-US"))}
@@ -112,7 +124,7 @@ ${row("Gas price (median / p90)", (c) => `${gwei(c.t!.gp50)} / ${gwei(c.t!.gp90)
 ${row("Base fee (avg)", (c) => gwei(c.b!.bf))}
 ${row("Fees paid", (c) => `${feeEth(c.fees).toFixed(4)} ETH${ethUsd ? ` (${usd(feeEth(c.fees) * ethUsd)})` : ""}`)}
 ${row("Avg fee per tx", (c) => (ethUsd && c.n ? `$${((feeEth(c.fees) / c.n) * ethUsd).toFixed(5)}` : `${(feeEth(c.fees) / Math.max(1, c.n)).toExponential(2)} ETH`))}
-${row("Failed", (c) => `${((Number(c.t!.failed) / Math.max(1, c.n)) * 100).toFixed(1)}%`)}
+${row("Failed (user txs)", (c) => `${(failed(c) * 100).toFixed(1)}%`)}
 ${row("Active senders", (c) => Number(c.t!.senders).toLocaleString("en-US"))}
 ${row("Contracts created", (c) => Number(c.t!.creates).toLocaleString("en-US"))}
 </table></div>` };
