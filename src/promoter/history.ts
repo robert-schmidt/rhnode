@@ -144,7 +144,10 @@ export async function history(up: Client, golive: number): Promise<void> {
       floor = lo;
       if (projectedAt - floor >= PROJECT_EVERY || floor === 0) {
         const [tip] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'tip'");
+        const t1 = Date.now(); // ~7 min for 1M blocks' tokens (2026-11-01): logged, so a pause here isn't read as a stall
+        console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projecting: dirty.size }));
         await projectTokens(up, [...dirty], Number(tip.block), `history:${floor}`);
+        console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projected: dirty.size, ms: Date.now() - t1 }));
         dirty.clear();
         projectedAt = floor;
       }
