@@ -140,6 +140,18 @@ test("agg_chain_hourly: blocks and user txs per hour; a rollback's rows take the
     { a: time, z: time, n_blocks: 1, n_gas: 1000, n_bf: 20, n_txs: 2, n_failed: 1, n_creates: 1, n_fees: 300, n_senders: 1 });
 });
 
+test("agg_chain_hourly from headers (028): user txs as tx_count - 1, fees at the base fee, one gas price per user tx; a retried chunk counts once", { skip }, async () => {
+  const time = "2026-05-01 07:10:00", H = (c: string) => "0x" + c.repeat(64);
+  const chunk = [{ number: 50, hash: H("a"), time, tx_count: 4, gas_used: 900, base_fee: 10, sign: 1 },
+    { number: 51, hash: H("b"), time, tx_count: 1, gas_used: 0, base_fee: 40, sign: 1 }];
+  await insert("hist_blocks", chunk, "hourly:t-50");
+  await insert("hist_blocks", chunk, "hourly:t-50");
+  const [h] = await rows<Record<string, string | number | number[]>>(`SELECT sum(blocks) AS n_blocks, sum(head_txs) AS n_head, sum(txs) AS n_txs, toString(sum(fees)) AS n_fees,
+    quantilesTDigestMerge(0.1, 0.5, 0.9)(gas_price) AS gp FROM agg_chain_hourly WHERE hour = '2026-05-01 07:00:00'`);
+  assert.deepEqual({ ...h, n_blocks: Number(h.n_blocks), n_head: Number(h.n_head), n_txs: Number(h.n_txs), n_fees: Number(h.n_fees) },
+    { n_blocks: 2, n_head: 3, n_txs: 0, n_fees: 9000, gp: [10, 10, 10] }); // block 51 has only its internal tx: no gas price
+});
+
 test("findFork: the highest block whose stored hash matches the chain, skipping blocks no longer stored", async () => {
   const stored: Record<number, string> = { 98: "a", 99: "b", 100: "x" }; // 101 was already deleted
   const chain: Record<number, string> = { 98: "a", 99: "b", 100: "c", 101: "d" };
