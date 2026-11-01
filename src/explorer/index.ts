@@ -156,6 +156,7 @@ ${o.token ? html`<div class="note"><p class="ok">Welcome, @${o.login}: this brow
 <p class="mono wrap token">${o.token}</p><p><a href="/">Open the explorer →</a></p></div>`
     : o.login ? html`<p class="ok">This browser has access (@${o.login}). <a href="/">Open the explorer →</a></p>` : ""}
 <p>The explorer is free: Robinhood Chain read straight from our own node and index. Access tokens keep it fast for everyone.</p>
+${o.login || o.token ? "" : html`<p class="muted small">Why sign in? It costs nothing but two clicks${cfg.explorer.requireStar ? " (a star and an issue)" : ""}. ${cfg.explorer.requireStar ? "Stars help this open-source project get noticed, and keeping" : "Keeping"} the explorer behind a light gate rather than fully public keeps it fast for everyone who uses it.</p>`}
 <h2>Get a token</h2>
 <ol class="steps">
 ${cfg.explorer.requireStar ? html`<li>Star the repository <a href="${REPO}" rel="noopener" target="_blank">${REPO_NAME}</a>.</li>` : ""}
