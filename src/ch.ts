@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createClient } from "@clickhouse/client";
 import { cfg } from "./config.ts";
 
@@ -19,8 +20,14 @@ export async function insert(table: string, values: object[], token: string): Pr
   });
 }
 
+/** The ClickHouse CPU workload (migration 030) of the queries run inside `workload.run(name, f)`: "bulk" for heavy
+ *  reads apps make in volume (cards, pool reports, discovery), which then get a quarter of the CPU while anything else
+ *  wants it, and all of it when nothing does. Everything else runs in "default". */
+export const workload = new AsyncLocalStorage<string>();
+
 export async function rows<T>(query: string, query_params?: Record<string, unknown>): Promise<T[]> {
-  return (await ch.query({ query, query_params, format: "JSONEachRow" })).json<T>();
+  const w = workload.getStore();
+  return (await ch.query({ query, query_params, format: "JSONEachRow", ...(w ? { clickhouse_settings: { workload: w } } : {}) })).json<T>();
 }
 
 /** The time span {t0, t1} of blocks (from, to], for `inSpan()`: raw/ev tables are partitioned by day on `time` and sorted by

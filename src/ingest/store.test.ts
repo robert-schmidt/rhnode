@@ -15,7 +15,7 @@ const admin = createClient({
 });
 const skip = !(await admin.ping()).success && "no ClickHouse at CLICKHOUSE_URL";
 
-const { ch, insert, rows } = await import("../ch.ts");
+const { ch, insert, rows, workload } = await import("../ch.ts");
 const { migrate } = await import("../migrate.ts");
 const { decodeBlock } = await import("./decode.ts");
 const { emptyCtx, KEEP } = await import("./keep.ts");
@@ -167,4 +167,12 @@ test("findFork: the highest block whose stored hash matches the chain, skipping 
   const chain: Record<number, string> = { 98: "a", 99: "b", 100: "c", 101: "d" };
   assert.equal(await findFork(101, async (k) => stored[k] ?? null, async (k) => chain[k]), 99);
   assert.equal(await findFork(101, async () => "z", async (k) => chain[k], 5), null);
+});
+
+test("workloads (030): queries inside workload.run('bulk') run in bulk, others in default; both exist", { skip }, async () => {
+  const w = async () => (await rows<{ w: string }>("SELECT getSetting('workload') AS w"))[0].w;
+  assert.equal(await workload.run("bulk", w), "bulk");
+  assert.equal(await w(), "default");
+  const names = (await rows<{ name: string }>("SELECT name FROM system.workloads ORDER BY name")).map((r) => r.name);
+  for (const x of ["all", "bulk", "default"]) assert.ok(names.includes(x), x);
 });

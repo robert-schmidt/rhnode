@@ -21,7 +21,9 @@
 // runs, it rests DISCOVERY_REST times as long as a round took (each token read touches a granule in every kept_transfers
 // part, ~260K rows whatever its size: measured 2026-10-31, unthrottled it cut the pass from ~800 to ~250 inserts per 5 min).
 import { keccak256 } from "viem";
-import { ch, insert, rows } from "./ch.ts";
+import { createClient } from "@clickhouse/client";
+import { ch, insert, rows, workload } from "./ch.ts";
+import { cfg } from "./config.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
 import { BURN_SINKS, METRIC_OMM_FACTORY, NATIVE_ETH, UNIV2_FACTORY, UNIV3_FACTORY, UNIV4_POOL_MANAGER, USDG, WETH } from "./chain/constants.ts";
 import { HOOK_SOURCES } from "./chain/registry.ts";
@@ -239,21 +241,30 @@ export const ERC20_PAYOUTS = `INSERT INTO curve_payouts
     AND (u IS NOT NULL OR (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts WHERE source = 'transfer'))`;
 
 let erc20At = 0;
+// The ERC-20 step reads ~800M rows (115–141 s on the busy box, 2026-11-01): the shared client gave up at 60 s while
+// ClickHouse finished the insert anyway, and as the step only counted as done on success it ran again every round
+// (~3 min). Its own client waits 10 min, and it's tried hourly whether or not the last try worked.
+const slow = createClient({ ...cfg.clickhouse, request_timeout: 600_000,
+  clickhouse_settings: { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: "10000" } }); // headers keep the socket alive
 async function payouts(): Promise<number> {
   const [c] = await rows<{ p: string; t: string }>("SELECT maxIf(block, name = 'payouts') AS p, maxIf(block, name = 'trace') AS t FROM ctl_cursors FINAL WHERE name IN ('payouts', 'trace')");
   const lo = Math.max(Number(c.p), TRACE_START - 1), hi = Math.min(Number(c.t) - LAG, lo + NATIVE_STEP);
   let n = 0;
   if (hi > lo) {
     const [b] = await rows<{ t: string }>("SELECT toString(time - INTERVAL 1 HOUR) AS t FROM raw_blocks WHERE number = {b:UInt64}", { b: lo + 1 });
-    await ch.command({ query: NATIVE_PAYOUTS, query_params: { lo, hi, t0: b?.t ?? "2026-10-31 00:00:00" } });
+    await ch.command({ query: NATIVE_PAYOUTS, query_params: { lo, hi, t0: b?.t ?? "2026-10-31 00:00:00" }, clickhouse_settings: { workload: "bulk" } });
     await insert("ctl_cursors", [{ name: "payouts", block: hi, hash: "", version: Date.now() }], `payouts:${hi}`);
     n = hi - lo;
   }
-  if (Date.now() - erc20At > 3_600_000) { await ch.command({ query: ERC20_PAYOUTS }); erc20At = Date.now(); n++; }
+  if (Date.now() - erc20At > 3_600_000) { erc20At = Date.now(); await slow.command({ query: ERC20_PAYOUTS, clickhouse_settings: { workload: "bulk" } }); n++; }
   return n;
 }
 
 export async function discoveryWorker(up: Up): Promise<never> {
+  return workload.run("bulk", () => discoveryLoop(up)); // its reads are heavy and nobody waits on them
+}
+
+async function discoveryLoop(up: Up): Promise<never> {
   for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
       const t0 = Date.now(), n = await creations(up) + await origins(up) + await markets(up) + await payouts();
