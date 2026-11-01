@@ -7,7 +7,7 @@
 // already holds since go-live is copied into kept_transfers, never refetched; its balances are already counted. The
 // token is watched (live ingest keeps it) and re-projected: complete = 1 only if minted = totalSupply() on chain.
 import { cfg, parseUpstreams } from "../config.ts";
-import { ch, insert, rows } from "../ch.ts";
+import { ch, insert, rows, workload } from "../ch.ts";
 import { upstream } from "../chain/upstream.ts";
 import { KEEP } from "../ingest/keep.ts";
 import { TRANSFER, topicAddr, word0 } from "../ingest/decode.ts";
@@ -124,7 +124,8 @@ export async function promote(token: string, B0: number): Promise<{ status: stri
   return s?.complete ? { status: "done", transfers: erc20.length, note } : { status: "incomplete", transfers: erc20.length, note: `${note}; minted ${s?.minted} ≠ supply ${s?.total_supply}` };
 }
 
-if (import.meta.main) {
+// Everything here is tier 3 (migration 031): it gets ClickHouse's CPU after the tip and priority API keys.
+if (import.meta.main) await workload.run("bulk", async () => {
   const B0 = await golive();
   console.log(`[promoter] go-live block ${B0}; max ${MAX_TRANSFERS} transfers a token, ${CONCURRENCY} at a time`);
   void walletWorker(); // requested wallets (src/watch.ts) are indexed alongside the history pass and token promotion
@@ -151,4 +152,4 @@ if (import.meta.main) {
     busy.delete(q.token);
   } };
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-}
+});

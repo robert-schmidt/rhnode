@@ -1,11 +1,15 @@
 # One stack (ARCHITECTURE §8.2). Data lives in named volumes only. ClickHouse, Redis and Nitro are published on
 # NODE_BIND (loopback by default; 0.0.0.0 for an API box on the LAN, which ops/firewall.sh then admits alone).
 name: rhnode
+# CPU under contention (cpu_shares, relative; 1024 = Docker's default): 1. the node keeping up with the chain (nitro,
+# l1proxy, ingest), 2. serving (clickhouse, redis, projector; ClickHouse splits its own share by workload, migration
+# 031), 3. everything else (promoter). They only bite when the CPU is full. Applied live with `docker update --cpu-shares`.
 
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:26.3
     restart: unless-stopped
+    cpu_shares: 2048
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-rhnode}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
@@ -26,12 +30,14 @@ services:
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
+    cpu_shares: 2048
     command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
     ports: ["${NODE_BIND:-127.0.0.1}:6379:6379"] # the API box reads the block stream (ops/firewall.sh admits only it)
 
   ingest:
     build: .
     restart: unless-stopped
+    cpu_shares: 4096 # tier 1: the tip (and its traces, lost if late)
     command: ["node", "src/ingest/main.ts"]
     env_file: .env
     environment:
@@ -44,6 +50,7 @@ services:
   projector:
     build: .
     restart: unless-stopped
+    cpu_shares: 2048
     command: ["node", "src/projector/main.ts"]
     env_file: .env
     environment:
@@ -55,6 +62,7 @@ services:
   promoter:
     build: .
     restart: unless-stopped
+    cpu_shares: 256 # tier 3: the history pass, promotion, discovery
     command: ["node", "src/promoter/main.ts"]
     env_file: .env
     environment:
@@ -72,6 +80,7 @@ services:
     profiles: ["node"]
     build: .
     restart: unless-stopped
+    cpu_shares: 4096
     command: ["node", "src/l1proxy.ts"]
     environment:
       L1_HTTP: ${L1_HTTP:-https://eth.drpc.org|20} # url|rps,… first one up wins; dRPC is keyless and serves old logs (2026-10-30)
@@ -80,6 +89,7 @@ services:
     profiles: ["node"]
     image: offchainlabs/nitro-node:v3.12.2-5f02f3f
     restart: unless-stopped
+    cpu_shares: 4096 # tier 1: following the chain
     stop_grace_period: 5m
     depends_on: [l1proxy]
     mem_limit: ${NITRO_MEM:-8g}

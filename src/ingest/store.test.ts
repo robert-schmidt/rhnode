@@ -169,10 +169,11 @@ test("findFork: the highest block whose stored hash matches the chain, skipping 
   assert.equal(await findFork(101, async () => "z", async (k) => chain[k], 5), null);
 });
 
-test("workloads (030): queries inside workload.run('bulk') run in bulk, others in default; both exist", { skip }, async () => {
+test("workloads (030, 031): queries inside workload.run('bulk') run in bulk, others in default; both exist", { skip }, async () => {
   const w = async () => (await rows<{ w: string }>("SELECT getSetting('workload') AS w"))[0].w;
   assert.equal(await workload.run("bulk", w), "bulk");
   assert.equal(await w(), "default");
   const names = (await rows<{ name: string }>("SELECT name FROM system.workloads ORDER BY name")).map((r) => r.name);
-  for (const x of ["all", "bulk", "default"]) assert.ok(names.includes(x), x);
+  for (const x of ["all", "bulk", "default", "apps", "apps_light", "apps_heavy"]) assert.ok(names.includes(x), x);
+  assert.equal(await workload.run("apps_light", w), "apps_light");
 });

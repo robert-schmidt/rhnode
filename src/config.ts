@@ -54,6 +54,8 @@ export const cfg = {
     port: int(env.API_LISTEN_PORT, 8080),
     /** `name:key,name:key`. Every route except /health needs one (header x-api-key, ?apikey=, or /rpc/<key>, /ws/<key>). */
     keys: new Map((env.API_KEYS ?? "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => { const i = x.indexOf(":"); return [x.slice(i + 1), x.slice(0, i)] as [string, string]; })),
+    /** `name,name`: keys served first under load (ClickHouse workloads apps_*, migration 031); others run in "bulk". */
+    priority: new Set((env.API_PRIORITY ?? "").split(",").map((x) => x.trim()).filter(Boolean)),
     /** Requests per second per key (token bucket, 2 s burst). WebSocket notifications don't count. */
     rps: int(env.API_RPS, 200),
     /** Immutable JSON-RPC results (receipts, txs, old blocks) kept in memory. */
