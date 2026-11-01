@@ -40,12 +40,17 @@ export async function walkFloor(): Promise<number | null> {
 }
 
 /** Blocks ingest trails our node by (null: the node isn't synced or known). */
+/** null: wait (our node isn't synced, or the pass is paused). */
 async function ingestLag(): Promise<number | null> {
   if (!nitroSynced() || nitro.head == null) return null;
   // With tip traces the tracer counts as ingest: it lost three 1,000-block windows on 2026-10-31 while the pass ran at
   // 32 in flight and ingest itself kept up, so the pass backs off when either trails.
-  const [t] = await rows<{ b: string }>("SELECT min(block) AS b FROM ctl_cursors FINAL WHERE name IN {n:Array(String)}",
+  // Paused while ctl_cursors 'history_pause' has block 1 (2026-11-01, to leave the node to a client's heavy hour):
+  // `INSERT INTO ctl_cursors (name, block, hash, version) VALUES ('history_pause', 1, '', toUnixTimestamp64Milli(now64()))`, 0 resumes.
+  const [t] = await rows<{ b: string; p: string }>(
+    "SELECT minIf(block, name IN {n:Array(String)}) AS b, maxIf(block, name = 'history_pause') AS p FROM ctl_cursors FINAL WHERE name IN {n:Array(String)} OR name = 'history_pause'",
     { n: cfg.traces === "tip" ? ["tip", "trace"] : ["tip"] });
+  if (Number(t?.p)) return null;
   return nitro.head - Number(t?.b ?? 0);
 }
 
