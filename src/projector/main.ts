@@ -100,19 +100,24 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
 }
 
 /** Hourly: a complete token whose totalSupply() moved without a Transfer we saw (rebasing, a non-standard mint) is
- *  re-projected, which clears `complete` when minted no longer matches. One multicall per 500 tokens. */
-export async function driftSweep(up: Client, tip: number): Promise<number> {
+ *  re-projected, which clears `complete` when minted no longer matches. One multicall per 500 tokens, each at the
+ *  newest stored block: 805K complete tokens (2026-11-01) take minutes, and our node keeps only ~1,200 blocks of state,
+ *  so one fixed block went stale and every read fell back to the rate-limited public endpoints (the projector stalled).
+ *  A token that moved since its serve_tokens row only gets re-projected (it would be at its next transfer anyway). */
+export async function driftSweep(up: Client): Promise<number> {
   const done = await rows<{ token: string; supply: string }>("SELECT token, toString(total_supply) AS supply FROM serve_tokens FINAL WHERE complete = 1");
   const drifted: string[] = [];
+  let tip = 0;
   for (let i = 0; i < done.length; i += 500) {
     const chunk = done.slice(i, i + 500);
+    tip = await cursor("tip");
     const reads = await readTokens(up, tip, chunk.map(({ token }) => ({ token, fns: ["totalSupply"] as Fn[] })));
     for (const { token, supply } of chunk) {
       const s = reads.get(token)?.totalSupply;
       if (typeof s !== "bigint" || s.toString() !== supply) drifted.push(token);
     }
   }
-  if (drifted.length) await projectTokens(up, drifted, tip, `drift:${tip}`);
+  for (let i = 0; i < drifted.length; i += 500) { tip = await cursor("tip"); await projectTokens(up, drifted.slice(i, i + 500), tip, `drift:${tip}:${i}`); }
   return drifted.length;
 }
 
@@ -126,10 +131,11 @@ if (import.meta.main) {
   let cLast = await cursor("contracts") || last;
   let sweptAt = 0;
   for (;;) {
-    if (Date.now() - sweptAt > 3_600_000 && last) {
+    if (Date.now() - sweptAt > 3_600_000 && last) { // beside the loop, not in it: prices and trades never wait for it
       sweptAt = Date.now();
-      const n = await driftSweep(up, last).catch((e: Error) => { console.warn(`[drift] ${e.message}`); return -1; });
-      console.log(JSON.stringify({ at: new Date().toISOString(), drift: n }));
+      const t0 = Date.now();
+      void driftSweep(up).then((n) => console.log(JSON.stringify({ at: new Date().toISOString(), drift: n, ms: Date.now() - t0 })),
+        (e: Error) => console.warn(`[drift] ${e.message}`));
     }
     const tip = await cursor("tip");
     if (!last) last = tip; // cold start: from now on

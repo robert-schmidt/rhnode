@@ -6,13 +6,14 @@
 import { cfg } from "../config.ts";
 import { insert, rows } from "../ch.ts";
 import { upstream } from "../chain/upstream.ts";
+import { TRACE_START } from "../discovery.ts";
 import { writeContracts } from "../projector/contracts.ts";
 
 const up = upstream(cfg.upstreamHttp);
 const CREATED = `SELECT address, blk AS block, ts AS time, txh AS tx_hash, dep AS deployer, fac AS factory FROM (
   SELECT toString(k.created) AS address, k.block AS blk, toUnixTimestamp(k.time) AS ts, toString(k.tx_hash) AS txh,
     toString(x.\`from\`) AS dep, if(k.creator != x.\`from\`, toString(k.creator), '') AS fac
-  FROM (SELECT * FROM creations FINAL) AS k INNER JOIN (SELECT hash, \`from\` FROM raw_txs WHERE status = 1) AS x ON x.hash = k.tx_hash)`;
+  FROM (SELECT * FROM creations FINAL) AS k INNER JOIN (SELECT hash, \`from\` FROM raw_txs WHERE status = 1 AND block >= ${TRACE_START} AND hash IN (SELECT tx_hash FROM creations)) AS x ON x.hash = k.tx_hash)`;
 
 const missing = await rows<{ address: string; block: string; time: number; tx_hash: string; deployer: string; factory: string }>(
   `SELECT * FROM (${CREATED}) WHERE address NOT IN (SELECT address FROM contracts) ORDER BY block`);
