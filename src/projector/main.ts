@@ -122,6 +122,8 @@ if (import.meta.main) {
   const up = upstream(cfg.upstreamHttp);
   const lookup = upstream(cfg.lookupHttp, { attempts: 2 });
   let last = await cursor("projector");
+  // contracts on their own cursor: with tip traces they wait for the tracer (creation frames come from its traces)
+  let cLast = await cursor("contracts") || last;
   let sweptAt = 0;
   for (;;) {
     if (Date.now() - sweptAt > 3_600_000 && last) {
@@ -143,7 +145,11 @@ if (import.meta.main) {
     const n = await project(up, last, to);
     const prices = await derivePrices(last, to);
     const trades = await deriveTrades(last, to);
-    const contracts = await deriveContracts(up, last, to);
+    if (!cLast) cLast = last;
+    const cTo = Math.min(to, cLast + MAX_BLOCKS, cfg.traces === "tip" ? await cursor("trace") : to);
+    const contracts = cTo > cLast ? await deriveContracts(up, cLast, cTo) : 0;
+    if (cTo > cLast) await ch.insert({ table: "ctl_cursors", values: [{ name: "contracts", block: cTo, hash: "", version: Date.now() }], format: "JSONEachRow" });
+    cLast = Math.max(cLast, cTo);
     await ch.insert({ table: "ctl_cursors", values: [{ name: "projector", block: to, hash: "", version: Date.now() }], format: "JSONEachRow" });
     console.log(JSON.stringify({ at: new Date().toISOString(), from: last + 1, to, tokens: n, pools, prices, trades, contracts, ms: Date.now() - t0 }));
     last = to;

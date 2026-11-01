@@ -1,5 +1,6 @@
-// New contracts (migrations/013_contracts.sql): every contract a tx creates, or that emits its first log, with a
-// fingerprint of its kind so a consumer can look at unique ones only. Facts only; what a contract is for stays in the apps.
+// New contracts (migrations/013_contracts.sql, 026): every contract a tx or a factory creates (a creation frame in the tip
+// traces), or that emits its first log, with a fingerprint of its kind so a consumer can look at unique ones only.
+// Facts only; what a contract is for stays in the apps.
 import { createHash } from "node:crypto";
 import { insert, inSpan, rows, span } from "../ch.ts";
 import type { Client } from "../chain/upstream.ts";
@@ -44,39 +45,54 @@ export function classify(code: string, impl = "") {
 
 let seen: Set<string> | null = null;
 
-/** Contracts first seen in (from, to]: created by a tx there, or emitting their first log there. */
+/** Contracts first seen in (from, to]: created by a tx or a factory there (creation frames: only where traced, so the
+ * caller keeps `to` at or below the trace cursor), or emitting their first log there. */
 export async function deriveContracts(up: Client, from: number, to: number): Promise<number> {
-  seen ??= new Set((await rows<{ f: string }>("SELECT DISTINCT fingerprint AS f FROM contracts WHERE fingerprint != ''")).map((r) => r.f));
   const t = await span(from, to);
-  const fresh = await rows<{ address: string; block: string; time: number; tx_hash: string; deployer: string; created: number }>(
-    `SELECT address, b AS block, t AS time, h AS tx_hash, d AS deployer, c AS created FROM (
+  const fresh = await rows<{ address: string; block: string; time: number; tx_hash: string; deployer: string; factory: string; created: number }>(
+    `SELECT address, b AS block, t AS time, h AS tx_hash, d AS deployer, f AS factory, c AS created FROM (
      SELECT address, min(block) AS b, toUnixTimestamp(min(time)) AS t, argMin(tx_hash, block) AS h,
-       argMax(deployer, by_tx) AS d, max(by_tx) AS c
-     FROM (SELECT created AS address, block, time, hash AS tx_hash, \`from\` AS deployer, 1 AS by_tx FROM raw_txs
+       argMax(deployer, by_tx) AS d, max(fac) AS f, max(by_tx) AS c
+     FROM (SELECT created AS address, block, time, hash AS tx_hash, \`from\` AS deployer, '' AS fac, 1 AS by_tx FROM raw_txs
            WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND created != '' AND status = 1
            UNION ALL
-           SELECT address, block, time, tx_hash, '' AS deployer, 0 AS by_tx FROM raw_logs
+           SELECT toString(k.created), k.block, k.time, toString(k.tx_hash), toString(x.\`from\`), if(k.creator != x.\`from\`, toString(k.creator), ''), 1
+           FROM (SELECT * FROM creations WHERE block > {from:UInt64} AND block <= {to:UInt64}) AS k
+           INNER JOIN (SELECT hash, \`from\` FROM raw_txs WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND status = 1) AS x ON x.hash = k.tx_hash
+           UNION ALL
+           SELECT address, block, time, tx_hash, '' AS deployer, '' AS fac, 0 AS by_tx FROM raw_logs
            WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})
      WHERE address NOT IN (SELECT address FROM contracts)
      GROUP BY address)`, { from, to, ...t });
-  if (!fresh.length) return 0;
-  const tip = "0x" + to.toString(16);
+  return fresh.length ? writeContracts(up, fresh) : 0;
+}
+
+type Fresh = { address: string; block: string; time: number; tx_hash: string; deployer: string; factory: string; created: number };
+
+/** Reads each one's code and writes its row. first_of_kind: only a contract we saw created (one first seen by a log may
+ * be months old), but every fingerprint counts as seen. Code at "latest": a proxy is often initialized a tx later, and
+ * our node keeps only ~1,200 blocks of state. */
+export async function writeContracts(up: Client, fresh: Fresh[]): Promise<number> {
+  seen ??= new Set((await rows<{ f: string }>("SELECT DISTINCT fingerprint AS f FROM contracts WHERE fingerprint != ''")).map((r) => r.f));
+  fresh.sort((a, b) => Number(a.block) - Number(b.block) || a.address.localeCompare(b.address));
   const out = await Promise.all(fresh.map(async (c) => {
-    const code = await up.call<string>("eth_getCode", [c.address, tip]).catch(() => "");
+    const code = await up.call<string>("eth_getCode", [c.address, "latest"]).catch(() => "");
     if (!code) return null; // not stored: it comes back with its next log
     // A small contract that delegates (DELEGATECALL, 0xf4) may be an EIP-1967 proxy: read its implementation slot.
     const slot = code && code.length < 2000 && code.includes("f4")
-      ? await up.call<string>("eth_getStorageAt", [c.address, IMPL_SLOT, tip]).catch(() => "") : "";
+      ? await up.call<string>("eth_getStorageAt", [c.address, IMPL_SLOT, "latest"]).catch(() => "") : "";
     const impl = slot && !/^0x0*$/.test(slot) ? "0x" + slot.slice(-40) : "";
-    const k = code !== "0x" ? classify(code, impl) : { kind: "contract", impl: "", selectors: [], fingerprint: "" };
-    const first = k.fingerprint && !seen!.has(k.fingerprint) ? 1 : 0;
+    return { c, code, k: code !== "0x" ? classify(code, impl) : { kind: "contract", impl: "", selectors: [] as string[], fingerprint: "" } };
+  }));
+  // in block order, after the reads (Promise.all would otherwise race on `seen`)
+  const ok = out.filter((r) => r !== null).map(({ c, code, k }) => {
+    const first = k.fingerprint && !seen!.has(k.fingerprint) && c.created === 1 ? 1 : 0;
     if (k.fingerprint) seen!.add(k.fingerprint);
     return {
       ...c, ...k, first_of_kind: first, code_size: Math.max(0, (code.length - 2) / 2),
       code_hash: code !== "0x" ? createHash("sha256").update(stripMetadata(code)).digest("hex").slice(0, 16) : "", version: Date.now(),
     };
-  }));
-  const ok = out.filter((r) => r !== null);
-  await insert("contracts", ok, `contracts:${from}-${to}`);
+  });
+  await insert("contracts", ok, `contracts:${ok[0]?.address}:${ok.at(-1)?.address}:${ok.length}:${fresh.at(-1)?.block}`);
   return ok.length;
 }

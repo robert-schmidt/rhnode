@@ -5,6 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createClient } from "@clickhouse/client";
+import type { Client } from "../chain/upstream.ts";
 
 process.env.CLICKHOUSE_DB = "rhnode_test";
 const admin = createClient({
@@ -91,6 +92,38 @@ test("curve payouts: a rerun writes nothing; a row stored without USD is written
   await insert("ev_prices", [{ block: 7, time, token: "0x" + "a".repeat(40), quote: WETH, venue: "v2", eth_usd: 3000, verified: 1, sign: 1 }], "t-payout-price");
   assert.equal(await run(), 2); // the priced row, once
   assert.deepEqual(await rows("SELECT usd FROM curve_payouts FINAL"), [{ usd: 3000 }]);
+});
+
+test("contracts: tx and factory creations are created; a reverted one isn't there; one first seen by a log is never first of its kind", { skip }, async () => {
+  const { deriveContracts } = await import("../projector/contracts.ts");
+  const A = (c: string) => "0x" + c.repeat(40), H = (c: string) => "0x" + c.repeat(64);
+  const time = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const code: Record<string, string> = { [A("1")]: "11111111", [A("2")]: "22222222", [A("3")]: "33333333", [A("9")]: "22222222" };
+  const up = { call: async (m: string, [a]: [string]) => m === "eth_getCode" && code[a] ? `0x63${code[a]}14` : "0x" } as unknown as Client;
+  await insert("raw_txs", [
+    { block: 10, hash: H("a"), time, from: A("e"), created: A("1"), status: 1 }, // a deployment
+    { block: 11, hash: H("b"), time, from: A("e"), status: 1 }, // calls a factory
+    { block: 12, hash: H("c"), time, from: A("e"), status: 0 }, // reverted
+  ], "t-contracts-txs");
+  await insert("creations", [
+    { created: A("1"), creator: A("e"), type: "CREATE", block: 10, tx_hash: H("a"), time },
+    { created: A("2"), creator: A("f"), type: "CREATE2", block: 11, tx_hash: H("b"), time }, // never logs
+    { created: A("3"), creator: A("f"), type: "CREATE2", block: 11, tx_hash: H("b"), time },
+    { created: A("4"), creator: A("f"), type: "CREATE", block: 12, tx_hash: H("c"), time },
+  ], "t-contracts-creations");
+  await insert("raw_logs", [
+    { block: 9, tx_hash: H("d"), time, address: A("9") }, // an old contract, first seen now; same kind as 0x22…
+    { block: 11, tx_hash: H("b"), time, address: A("3") },
+  ], "t-contracts-logs");
+  assert.equal(await deriveContracts(up, 8, 12), 4);
+  const got = await rows<{ address: string; created: number; deployer: string; factory: string; first_of_kind: number }>(
+    "SELECT address, created, deployer, factory, first_of_kind FROM contracts FINAL WHERE block BETWEEN 9 AND 12 ORDER BY address");
+  assert.deepEqual(got, [
+    { address: A("1"), created: 1, deployer: A("e"), factory: "", first_of_kind: 1 },
+    { address: A("2"), created: 1, deployer: A("e"), factory: A("f"), first_of_kind: 0 }, // its kind was seen at 0x99… first
+    { address: A("3"), created: 1, deployer: A("e"), factory: A("f"), first_of_kind: 1 },
+    { address: A("9"), created: 0, deployer: "", factory: "", first_of_kind: 0 },
+  ]);
 });
 
 test("findFork: the highest block whose stored hash matches the chain, skipping blocks no longer stored", async () => {
