@@ -129,8 +129,10 @@ Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_block
   `ops/deploy.sh --infra` applies it.
 - **Restarts:** every service has `restart: unless-stopped`, and Docker waits for the data disk (`RequiresMountsFor`). On
   top of that, `ops/rhnode-heal.timer` runs `ops/heal.sh` every 2 minutes: it mounts `DATA_MOUNT` if the disk came up
-  late, starts Docker, and runs `docker compose up -d` when a service isn't running. Running containers are never
-  restarted. To stop the stack on purpose, stop the timer first. Install it (the units assume `/srv/rhnode`):
+  late, starts Docker, and runs `docker compose up -d` when a service isn't running. The one running container it
+  restarts is Nitro, cleanly (it persists first): when its head hasn't moved for 10 minutes, or before the kernel would
+  kill it (≥95% of `NITRO_MEM`, or under 1 GB available), at most once per 30 minutes and 3 times in 6 hours. To stop
+  the stack on purpose, stop the timer first. Install it (the units assume `/srv/rhnode`):
   ```sh
   sudo cp ops/rhnode-heal.service ops/rhnode-heal.timer /etc/systemd/system/
   sudo systemctl daemon-reload && sudo systemctl enable --now rhnode-heal.timer
