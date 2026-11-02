@@ -12,6 +12,15 @@ export const CSS_PATH = `/static/style.${createHash("sha256").update(CSS).digest
 export const JS = readFileSync(new URL("./live.js", import.meta.url));
 export const JS_PATH = `/static/live.${createHash("sha256").update(JS).digest("hex").slice(0, 10)}.js`;
 
+/** The deployment's logo (cfg.explorer.logo), beside the header title, at a content-hashed URL too. */
+const LOGO_TYPES: Record<string, string> = { png: "image/png", svg: "image/svg+xml", gif: "image/gif", webp: "image/webp" };
+export const LOGO = ((f) => {
+  const ext = f.split(".").pop()?.toLowerCase() ?? "";
+  if (!f || !LOGO_TYPES[ext]) return null;
+  const body = readFileSync(f);
+  return { body, type: LOGO_TYPES[ext], path: `/static/logo.${createHash("sha256").update(body).digest("hex").slice(0, 10)}.${ext}` };
+})(cfg.explorer.logo);
+
 export class Html { readonly s: string; constructor(s: string) { this.s = s; } toString() { return this.s; } }
 const ESC: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 export const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, (c) => ESC[c]);
@@ -38,7 +47,7 @@ export function page(title: string, body: Html, opts: { q?: string; refresh?: nu
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.live ? html`<noscript>${refresh}</noscript>` : refresh}
 <title>${title} · Robinhood Chain Explorer</title><link rel="stylesheet" href="${CSS_PATH}"><script src="${JS_PATH}" defer></script>
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
-<body><header><div class="bar"><a class="brand" href="/">Robinhood <span>Chain</span> Explorer</a>
+<body><header><div class="bar"><a class="brand" href="/">${LOGO ? html`<img src="${LOGO.path}" alt="" width="28" height="28">` : ""}Robinhood <span>Chain</span> Explorer</a>
 <form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off" enterkeyhint="search"><button>Search</button></form></div></header>
 <main>${body}</main>
 <footer>Robinhood Chain (4663), read from our own node and ClickHouse index. An independent explorer, not affiliated with Robinhood.

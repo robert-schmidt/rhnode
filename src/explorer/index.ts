@@ -3,7 +3,7 @@
 // block or tx for a day, live pages for seconds) and concurrent misses for one page share one render. Each client IP
 // gets a token bucket for cache misses only, so a cached page costs nothing; nginx limits raw request rates in front.
 import type http from "node:http";
-import { CSS, CSS_PATH, html, JS, JS_PATH, page, REPO, type Html } from "./html.ts";
+import { CSS, CSS_PATH, html, JS, JS_PATH, LOGO, page, REPO, type Html } from "./html.ts";
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
 import { address, block, hint, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
@@ -90,6 +90,10 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
   if (url.pathname === JS_PATH) {
     res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=31536000, immutable", ...SECURITY });
     res.end(JS); return true;
+  }
+  if (LOGO && url.pathname === LOGO.path) {
+    res.writeHead(200, { "content-type": LOGO.type, "cache-control": "public, max-age=31536000, immutable", ...SECURITY });
+    res.end(LOGO.body); return true;
   }
   if (url.pathname === "/robots.txt") {
     res.writeHead(200, { "content-type": "text/plain" });
