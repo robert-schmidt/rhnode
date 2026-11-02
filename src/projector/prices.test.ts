@@ -17,9 +17,9 @@ test("sides: the non-quote side is the token; ETH/USDG prices ETH; WETH/ETH and 
 
 test("v3, token is token0 (18 dec) vs WETH: a buy is negative amount0 (pool paid out), price from sqrtPrice", () => {
   // sqrtPrice for 1 token = 0.0001 WETH (raw ratio 1e-4): sqrt(1e-4) = 0.01 → 0.01 · 2^96
-  const p = priceSwap({ venue: "v3", a0: "-5000", a1: "600", sqrt: (Q96 / 100n).toString(), token0: TOKEN, token1: WETH }, 18, 3000)!;
-  assert.equal(p.tokenDelta, 5000n, "trader received 5000 token units");
-  assert.equal(p.quoteDelta, -600n, "trader paid 600 wei");
+  const p = priceSwap({ venue: "v3", a0: "-5000000", a1: "600", sqrt: (Q96 / 100n).toString(), token0: TOKEN, token1: WETH }, 18, 3000)!;
+  assert.equal(p.tokenDelta, 5000000n, "trader received 5,000,000 token units");
+  assert.equal(p.quoteDelta, -600n, "trader paid 600 wei (1.2e-4 each: the pool ends at 1e-4)");
   close(p.price, 1e-4);
   close(p.priceUsd, 0.3);
 });
@@ -63,9 +63,12 @@ test("bridges: a token/token pool is priced through the side with its own quote-
   assert.equal(p.quote, GME); assert.ok(Math.abs(p.price - 0.002) < 1e-12); assert.ok(Math.abs(p.priceUsd - 0.05) < 1e-12); assert.ok(Math.abs(p.usd - 50) < 1e-9);
 });
 
-test("execUsd: a bridge's USD per token is what the swap paid, not the price a drained v4 range is left at", () => {
-  // $200 of USDG for 4M tokens (18 dec) leaves the pool's sqrtPrice at the tick limit: priceUsd is absurd, execUsd isn't
+test("a swap that drains a v4 range: the price is what it paid, not the tick limit the pool is left at", () => {
+  // $200 of USDG for 4M tokens (18 dec) leaves the pool's sqrtPrice at the tick limit (a raw price of ~3.4e38)
   const p = priceSwap({ venue: "v4", a0: (4n * 10n ** 24n).toString(), a1: "-200000000", sqrt: "1461446703485210103287273052203988822378723970341", token0: TOKEN, token1: USDG }, 18, 3000)!;
-  assert.ok(p.priceUsd > 1e30);
+  close(p.priceUsd, 0.00005);
   close(execUsd(p.usd, p.tokenDelta, 18), 0.00005);
+  // an ordinary swap keeps the pool's price after it (price impact, not 100× off)
+  const q = priceSwap({ venue: "v3", a0: "-5000000", a1: "600", sqrt: (Q96 / 100n).toString(), token0: TOKEN, token1: WETH }, 18, 3000)!;
+  close(q.price, 1e-4);
 });

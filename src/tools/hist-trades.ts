@@ -71,7 +71,13 @@ export async function loadBridges(tokens: string[], from: number, to: number, de
     }
     for (const [k, b] of best) { const [t, m] = k.split("."); bUsd.get(t)!.at.set(Number(m), b.c); }
   }
-  for (const b of bUsd.values()) b.keys = [...b.at.keys()].sort((x, y) => x - y);
+  for (const b of bUsd.values()) {
+    // a minute closed by a swap that drained a v3/v4 range holds its tick limit (candles from before priceSwap's guard,
+    // 2026-11-02: up to 1.6e51 USD a trade): a minute 1000× off the token's median is left out
+    const vs = [...b.at.values()].sort((x, y) => x - y), med = vs[Math.floor(vs.length / 2)];
+    for (const [m, c] of b.at) if (c / med > 1000 || med / c > 1000) b.at.delete(m);
+    b.keys = [...b.at.keys()].sort((x, y) => x - y);
+  }
   const bridgesAt = (t: number, pl: { token0: string; token1: string }) => {
     const out = new Map<string, Bridge>();
     for (const tok of [pl.token0, pl.token1]) {

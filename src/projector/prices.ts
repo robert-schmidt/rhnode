@@ -52,6 +52,10 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
     const r = sqrt / 2 ** 96;
     raw = side.tokenIs0 ? r * r : 1 / (r * r);
   } else raw = Math.abs(Number(quoteDelta) / Number(tokenDelta));
+  // A swap that empties a v3/v4 range leaves the pool's price at the tick limit (BOOMER/USDG 2026-11-01: 3.4e50 USD):
+  // more than 100× off what the swap paid, the price is what it paid. 201 of 4.6M priced swaps in 14 days, 125 tokens.
+  const exec = Math.abs(Number(quoteDelta) / Number(tokenDelta));
+  if (exec > 0 && (raw / exec > 100 || exec / raw > 100)) raw = exec;
   const price = raw * 10 ** (tokenDecimals - dq);
   const quoteAmount = Math.abs(Number(quoteDelta)) / 10 ** dq;
   const toUsd = side.quote === USDG ? 1 : b ? b.usd : ethUsd ?? 0;
