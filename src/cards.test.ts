@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { band, poolState } from "./cards.ts";
+import { band, deeper, poolState } from "./cards.ts";
 
 const near = (a: number | null | undefined, b: number, tol = 1e-9) => assert.ok(a != null && Math.abs(a - b) <= Math.abs(b) * tol, `${a} ≠ ${b}`);
 const X96 = 2n ** 96n;
@@ -50,4 +50,14 @@ test("poolState: a Metric OMM pool's price is its last trade, its liquidity both
   const m = poolState("omm", true, 18, 6, 1, { b0: 10n ** 24n, b1: 5n * 10n ** 10n, last: 0.04 })!;
   assert.equal(m.price, 0.04); near(m.liquidityUsd, 90_000); near(m.quoteUsd, 50_000); assert.equal(m.kind, "balances");
   assert.equal(poolState("omm", true, 18, 6, 1, { b0: 10n ** 24n, b1: 5n * 10n ** 10n })!.liquidityUsd, null); // no trade yet
+});
+
+test("deeper: a thin main pool gives way to a runner-up that is as verified and deeper", () => {
+  const card = (verified: boolean, q: number | null) => ({ main_pool: { verified, liquidity_quote_usd: q } });
+  const thin = card(true, 22.57);
+  assert.deepEqual(deeper(thin, card(true, 900)), card(true, 900));
+  assert.equal(deeper(thin, card(false, 5_000)), thin, "never to an unverified pool");
+  assert.equal(deeper(thin, card(true, 10)), thin);
+  assert.equal(deeper(thin, card(true, null)), thin);
+  assert.equal(deeper(thin, undefined), thin);
 });
