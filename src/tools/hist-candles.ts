@@ -15,8 +15,12 @@ import { priceSwap, QUOTE_DECIMALS, sides, type Swap } from "../projector/prices
 
 const ETH_BUCKET = 1_000, FLUSH = 50_000;
 type Row = Swap & { block: string; tx_index: number; log_index: number; tx_hash: string; time: string; pool: string; tx_from: string; verified: number };
+// No JOIN to pools in the swap reads: with one, ClickHouse sorts the whole result instead of reading in key order
+// (3.4 GiB and killed at 13.5M rows of one pool; without, the pool's 34M rows take 954 MiB, 2026-11-02). Pools are
+// fetched apart and attached here.
 const SWAP_COLS = `s.block, s.tx_index, s.log_index, s.tx_hash, s.time, s.venue, s.pool, toString(s.amount0) AS a0, toString(s.amount1) AS a1,
-  toString(s.sqrt_price_x96) AS sqrt, s.tx_from, p.token0, p.token1, p.verified`;
+  toString(s.sqrt_price_x96) AS sqrt, s.tx_from`;
+type PoolRow = { pool: string; token0: string; token1: string; verified: number };
 
 /** PURE. ETH/USD at a block: the last bucket at or before it that has a median (the first one before any). */
 export function ethUsdAt(keys: number[], med: Map<number, number>, block: number): number | null {
@@ -35,18 +39,18 @@ async function main(fromDate: string) {
 
   // ETH/USD per bucket, from the verified ETH/USDG pools (814 on 2026-11-01). One pool at a time, in key order: all of
   // them in one FINAL read took 4.7 GiB and hit the server's cap; the busiest alone is 530 MiB, 7.7 s (2026-11-01).
-  const ethPools = (await rows<{ pool: string }>(
-    `SELECT pool FROM pools FINAL WHERE verified = 1 AND ok = 1 AND ((token0 IN {e:Array(String)} AND token1 = {u:String}) OR (token1 IN {e:Array(String)} AND token0 = {u:String}))`,
-    { e: [WETH, NATIVE_ETH], u: USDG })).map((p) => p.pool);
+  const ethPools = await rows<PoolRow>(
+    `SELECT pool, token0, token1, verified FROM pools FINAL WHERE verified = 1 AND ok = 1 AND ((token0 IN {e:Array(String)} AND token1 = {u:String}) OR (token1 IN {e:Array(String)} AND token0 = {u:String}))`,
+    { e: [WETH, NATIVE_ETH], u: USDG });
   const byBucket = new Map<number, number[]>();
   for (const pool of ethPools) {
     const rs = await long.query({
-      query: `SELECT ${SWAP_COLS} FROM kept_swaps AS s FINAL INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE pool = {p:String}) AS p USING pool
+      query: `SELECT ${SWAP_COLS} FROM kept_swaps AS s FINAL
         WHERE s.pool = {p:String} AND s.time >= toDateTime({from:UInt32}) - INTERVAL 1 DAY AND s.block < {g:UInt64} AND s.sign = 1 ORDER BY s.block, s.log_index`,
-      query_params: { ...r, p: pool }, format: "JSONEachRow",
+      query_params: { ...r, p: pool.pool }, format: "JSONEachRow",
     });
     for await (const chunk of rs.stream()) for (const row of chunk) {
-      const s = row.json<Row>(), p = priceSwap(s, 18, 1);
+      const s = { ...row.json<Row>(), ...pool }, p = priceSwap(s, 18, 1);
       if (!p || p.quote !== USDG || p.quoteAmount < 100) continue;
       const b = Math.floor(Number(s.block) / ETH_BUCKET);
       (byBucket.get(b) ?? byBucket.set(b, []).get(b)!).push(p.price);
@@ -83,15 +87,16 @@ async function main(fromDate: string) {
       await insert("hist_prices", out, `hist-candles:${fromDate}:${pre}:${n++}`);
       swaps += buf.length; priced += out.length; buf = [];
     };
+    const pools = new Map((await rows<PoolRow>(
+      "SELECT pool, token0, token1, verified FROM pools FINAL WHERE pool LIKE {like:String} AND ok = 1", { like: `${pre}%` })).map((p) => [p.pool, p]));
     const rs = await long.query({
       query: `SELECT ${SWAP_COLS} FROM kept_swaps AS s FINAL
-        INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE pool LIKE {like:String} AND ok = 1) AS p USING pool
         WHERE s.pool LIKE {like:String} AND s.time >= toDateTime({from:UInt32}) AND s.block < {g:UInt64} AND s.sign = 1
         ORDER BY s.pool, s.block, s.log_index`,
       query_params: { ...r, like: `${pre}%` }, format: "JSONEachRow",
     });
     for await (const chunk of rs.stream()) {
-      for (const row of chunk) buf.push(row.json<Row>());
+      for (const row of chunk) { const s = row.json<Row>(), p = pools.get(s.pool); if (p) buf.push({ ...s, ...p }); }
       if (buf.length >= FLUSH) await flush();
     }
     if (buf.length) await flush();
