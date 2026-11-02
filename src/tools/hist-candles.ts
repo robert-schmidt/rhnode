@@ -146,8 +146,10 @@ async function missing(fromDate: string, fix = false) {
   const long = createClient({ ...cfg.clickhouse, request_timeout: 3_600_000, clickhouse_settings: { workload: "bulk", max_threads: 2 } });
   let swaps = 0, priced = 0;
   const t0 = Date.now();
-  for (let i = 0; i < ids.length; i += 1_000) {
-    const batch = ids.slice(i, i + 1_000);
+  // --fix: 100 pools a batch; 1,000 hit the server's memory cap in the FINAL merge 3 times after a catch-up (2026-11-02)
+  const per = fix ? 100 : 1_000;
+  for (let i = 0; i < ids.length; i += per) {
+    const batch = ids.slice(i, i + per);
     const bt = [...new Set(batch.flatMap((id) => { const p = pools.get(id)!; return isBridged(p) ? [p.token0, p.token1] : []; }))].filter((t) => decimals.has(t));
     const { bridgesAt } = await loadBridges(bt, from, golive, decimals);
     const rs = await long.query({
@@ -174,7 +176,7 @@ async function missing(fromDate: string, fix = false) {
       if (out.length >= FLUSH) { await insert(into, out, `${tag}:${fromDate}:${batch[0]}:${n++}`); priced += out.length; out = []; }
     }
     if (out.length) { await insert(into, out, `${tag}:${fromDate}:${batch[0]}:${n++}`); priced += out.length; }
-    console.log(JSON.stringify({ at: new Date().toISOString(), pools: Math.min(i + 1_000, ids.length), of: ids.length, bridgeTokens: bt.length, swaps, priced, s: Math.round((Date.now() - t0) / 1000) }));
+    console.log(JSON.stringify({ at: new Date().toISOString(), pools: Math.min(i + per, ids.length), of: ids.length, bridgeTokens: bt.length, swaps, priced, s: Math.round((Date.now() - t0) / 1000) }));
   }
   console.log(`[hist-candles --missing] done: ${swaps} swaps, ${priced} priced, ${Math.round((Date.now() - t0) / 1000)} s`);
 }
