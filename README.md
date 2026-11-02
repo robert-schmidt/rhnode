@@ -184,6 +184,14 @@ What the stack runs (all pinned in `compose.yaml` / `package.json`):
 | Nitro (profile `node`) | `offchainlabs/nitro-node:v3.12.2-5f02f3f` | own Robinhood Chain node |
 | npm | `@clickhouse/client`, `viem`, `redis`, `ws` | |
 
+## Support
+
+If you find this helpful, consider donating:
+
+- SOL: `E8tLUC1RhBpRoF1we4onS5MkmpDQVVRvrqbE6Pyhufon`
+- EVMs: `0x8F06CE722d269567EbaEe6eA4fECE247534587A7`
+- BTC: `bc1q0jcp0e4muy53xlaxhz6pszgp8a9jpj6cmd95qh`
+
 ## License
 
 MIT
