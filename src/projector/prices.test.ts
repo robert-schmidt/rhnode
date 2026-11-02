@@ -17,9 +17,9 @@ test("sides: the non-quote side is the token; ETH/USDG prices ETH; WETH/ETH and 
 
 test("v3, token is token0 (18 dec) vs WETH: a buy is negative amount0 (pool paid out), price from sqrtPrice", () => {
   // sqrtPrice for 1 token = 0.0001 WETH (raw ratio 1e-4): sqrt(1e-4) = 0.01 → 0.01 · 2^96
-  const p = priceSwap({ venue: "v3", a0: "-5000", a1: "600", sqrt: (Q96 / 100n).toString(), token0: TOKEN, token1: WETH }, 18, 3000)!;
-  assert.equal(p.tokenDelta, 5000n, "trader received 5000 token units");
-  assert.equal(p.quoteDelta, -600n, "trader paid 600 wei");
+  const p = priceSwap({ venue: "v3", a0: "-5000000000000000000", a1: "600000000000000", sqrt: (Q96 / 100n).toString(), token0: TOKEN, token1: WETH }, 18, 3000)!;
+  assert.equal(p.tokenDelta, 5n * 10n ** 18n, "trader received 5 tokens");
+  assert.equal(p.quoteDelta, -6n * 10n ** 14n, "trader paid 0.0006 WETH ($1.80)");
   close(p.price, 1e-4);
   close(p.priceUsd, 0.3);
 });
@@ -61,6 +61,12 @@ test("bridges: a token/token pool is priced through the side with its own quote-
   // v2 sell of 1,000 TOKEN for 2 GME (pool-side amounts): 0.002 GME a token, $0.05; $50 moved
   const p = priceSwap({ venue: "v2", a0: (10n ** 21n).toString(), a1: (-2n * 10n ** 18n).toString(), sqrt: "0", token0: TOKEN, token1: GME }, 18, 3000, b)!;
   assert.equal(p.quote, GME); assert.ok(Math.abs(p.price - 0.002) < 1e-12); assert.ok(Math.abs(p.priceUsd - 0.05) < 1e-12); assert.ok(Math.abs(p.usd - 50) < 1e-9);
+});
+
+test("a swap under $0.01 sets no price; at $0.01 it does", () => {
+  // MHD 2026-11-02: 7e-8 WETH for 1.4e-11 tokens, $0.00016, "priced" at $11.19M a token
+  assert.equal(priceSwap({ venue: "v2", a0: "-14285714", a1: "70000000000", sqrt: "0", token0: TOKEN, token1: WETH }, 18, 2285), null);
+  close(priceSwap({ venue: "v2", a0: "-1000000000000000000", a1: "10000", sqrt: "0", token0: TOKEN, token1: USDG }, 18, 3000)!.priceUsd, 0.01);
 });
 
 test("a swap that drains a v4 range to its tick limit: the price is what it paid ($1 and up), dust gets none", () => {

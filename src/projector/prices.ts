@@ -15,6 +15,10 @@ import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 // Measured 2026-11-02, 4.4M v3/v4 quote-pool swaps in 14 days: 337 past it (184 of ≥ $1, 210 tokens), 9 in 600K–800K.
 // What a swap paid isn't the price everywhere: some v4 hook pools move other amounts (a $450 swap "paid" 150× under).
 const LIMIT_TICK = 800_000;
+// Any swap under $0.01 is dust and sets no price (it stays a trade, unpriced): MHD got $11.19M a token from a v2 swap of
+// $0.00016 (2026-11-02 15:37). Measured over 3 days: under $0.01 is 1.7% of priced swaps (68K), 5–6% of them more than
+// 100× off the token's median, against 0.12% at $1 and up. Not applied while a quote's USD price is unknown.
+const DUST_USD = 0.01;
 
 export const QUOTE_DECIMALS: Record<string, number> = { [USDG]: 6, [WETH]: 18, [NATIVE_ETH]: 18 };
 const isEth = (a: string) => a === WETH || a === NATIVE_ETH;
@@ -62,6 +66,7 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
   } else raw = Math.abs(Number(quoteDelta) / Number(tokenDelta));
   const quoteAmount = Math.abs(Number(quoteDelta)) / 10 ** dq;
   const toUsd = side.quote === USDG ? 1 : b ? b.usd : ethUsd ?? 0;
+  if (toUsd > 0 && quoteAmount * toUsd < DUST_USD) return null;
   if (limit) {
     if (quoteAmount * toUsd < 1) return null;
     raw = Math.abs(Number(quoteDelta) / Number(tokenDelta));
