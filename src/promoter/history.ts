@@ -125,8 +125,20 @@ export async function history(up: Client, golive: number): Promise<void> {
   const node = process.env.NITRO_HTTP;
   if (!node) throw new Error("HISTORY=1 needs NITRO_HTTP (our own node)");
   watchNitro(node);
-  let floor = (await walkFloor()) ?? golive, par = 4, projectedAt = floor;
+  let floor = (await walkFloor()) ?? golive, par = 4;
+  // The tokens touched since the last projection live only here, so the floor projected last is kept too
+  // (ctl_cursors 'history_projected') and after a restart those tokens are read back from kept_transfers (a reboot
+  // at 11:09, 2026-11-02, lost 766K blocks' worth). Time bounds from the node: kept_transfers' key starts with token.
+  const [pc] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'history_projected'");
+  let projectedAt = pc ? Number(pc.block) : floor;
   const dirty = new Set<string>();
+  if (projectedAt > floor) {
+    const at = (n: number) => batch<{ timestamp: string }>(node, "eth_getBlockByNumber", n, n, (x) => [hex(x), false]).then(([b]) => b);
+    const [a, b] = await Promise.all([at(floor), at(projectedAt)]);
+    for (const r of await rows<{ token: string }>(`SELECT DISTINCT token FROM kept_transfers WHERE time >= toDateTime({a:UInt32})
+        AND time <= toDateTime({b:UInt32}) AND block >= {lo:UInt64} AND block < {hi:UInt64} SETTINGS workload = 'bulk'`,
+      { a: Number(a.timestamp), b: Number(b.timestamp), lo: floor, hi: projectedAt })) dirty.add(r.token);
+  }
   console.log(`[history] floor ${floor}, ${STEP} blocks a chunk, ${BATCH} blocks a batch, up to ${PAR_MAX} in flight`);
   while (floor > 0) {
     try {
@@ -150,6 +162,7 @@ export async function history(up: Client, golive: number): Promise<void> {
         console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projected: dirty.size, ms: Date.now() - t1 }));
         dirty.clear();
         projectedAt = floor;
+        await ch.insert({ table: "ctl_cursors", values: [{ name: "history_projected", block: floor, hash: "", version: Date.now() }], format: "JSONEachRow" });
       }
       const ms = Date.now() - t0;
       if (lo % 20_000 === 0) console.log(JSON.stringify({ at: new Date().toISOString(), history: lo, par, lag, behind: nitro.behind, ms,
