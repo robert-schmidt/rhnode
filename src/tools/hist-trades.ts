@@ -44,6 +44,42 @@ export function lastAtOrBefore(keys: number[], x: number): number | null {
   return at < 0 ? null : keys[at];
 }
 
+/** Bridges for token/token pools before go-live (also src/tools/hist-candles.ts): each token's USD close per minute from
+ *  its busiest verified quote pool in agg_candles_1m (≥ $100 that minute), from a day before `from`; bridgesAt(t, pool)
+ *  gives each side's last close at or before t, up to a day old. */
+export async function loadBridges(tokens: string[], from: number, to: number, decimals: Map<string, number>) {
+  const bUsd = new Map<string, { keys: number[]; at: Map<number, number>; vol: number }>();
+  for (let i = 0; i < tokens.length; i += 1_000) {
+    const cs = await rows<{ token: string; pool: string; m: number; c: number; v: number }>(
+      `SELECT token, pool, toUnixTimestamp(minute) AS m, argMaxMerge(close_usd) AS c, sum(volume_usd) AS v FROM agg_candles_1m
+       WHERE token IN {t:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String}) AND minute >= toDateTime({from:UInt32}) - INTERVAL 1 DAY AND minute < toDateTime({to:UInt32})
+       GROUP BY token, pool, m HAVING v >= 100`, { from, to, t: tokens.slice(i, i + 1_000), w: WETH, n: NATIVE_ETH, u: USDG });
+    const ver = new Set<string>(), cp = [...new Set(cs.map((c) => c.pool))];
+    for (let j = 0; j < cp.length; j += 1_000)
+      for (const r of await rows<{ pool: string }>("SELECT pool FROM pools FINAL WHERE verified = 1 AND pool IN {p:Array(String)}", { p: cp.slice(j, j + 1_000) })) ver.add(r.pool);
+    const best = new Map<string, { c: number; v: number }>();
+    for (const c of cs) {
+      if (!ver.has(c.pool) || !(Number(c.c) > 0)) continue;
+      const k = `${c.token}.${c.m}`, b = best.get(k);
+      if (!b || Number(c.v) > b.v) best.set(k, { c: Number(c.c), v: Number(c.v) });
+      const t = bUsd.get(c.token) ?? bUsd.set(c.token, { keys: [], at: new Map(), vol: 0 }).get(c.token)!;
+      t.vol += Number(c.v);
+    }
+    for (const [k, b] of best) { const [t, m] = k.split("."); bUsd.get(t)!.at.set(Number(m), b.c); }
+  }
+  for (const b of bUsd.values()) b.keys = [...b.at.keys()].sort((x, y) => x - y);
+  const bridgesAt = (t: number, pl: { token0: string; token1: string }) => {
+    const out = new Map<string, Bridge>();
+    for (const tok of [pl.token0, pl.token1]) {
+      const b = bUsd.get(tok);
+      const k = b && lastAtOrBefore(b.keys, t - (t % 60));
+      if (k != null && t - k <= 86_400) out.set(tok, { dec: decimals.get(tok)!, usd: b!.at.get(k)!, vol: b!.vol });
+    }
+    return out;
+  };
+  return { bridgesAt, priced: bUsd.size };
+}
+
 async function main(from: number, to: number) {
   const [g] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'golive'");
   const p = { from, to, g: g.block };
@@ -79,38 +115,9 @@ async function main(from: number, to: number) {
      GROUP BY minute, pool) GROUP BY m`, { ...p, w: WETH, n: NATIVE_ETH, u: USDG })).map((r) => [Number(r.m), Number(r.c)]));
   const ethKeys = [...eth.keys()].sort((a, b) => a - b);
   const ethAt = (t: number) => atOrBefore(ethKeys, eth, t - (t % 60));
-  // bridges: the USD close per minute of each side of a token/token pool, from its busiest verified quote pool
   const bridged = [...new Set([...pools.values()].filter((x) => !(x.token0 in QUOTE_DECIMALS) && !(x.token1 in QUOTE_DECIMALS))
     .flatMap((x) => [x.token0, x.token1]))].filter((t) => decimals.has(t));
-  const bUsd = new Map<string, { keys: number[]; at: Map<number, number>; vol: number }>();
-  for (let i = 0; i < bridged.length; i += 1_000) {
-    const cs = await rows<{ token: string; pool: string; m: number; c: number; v: number }>(
-      `SELECT token, pool, toUnixTimestamp(minute) AS m, argMaxMerge(close_usd) AS c, sum(volume_usd) AS v FROM agg_candles_1m
-       WHERE token IN {t:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String}) AND minute >= toDateTime({from:UInt32}) - INTERVAL 1 DAY AND minute < toDateTime({to:UInt32})
-       GROUP BY token, pool, m HAVING v >= 100`, { ...p, t: bridged.slice(i, i + 1_000), w: WETH, n: NATIVE_ETH, u: USDG });
-    const ver = new Set<string>(), cp = [...new Set(cs.map((c) => c.pool))];
-    for (let j = 0; j < cp.length; j += 1_000)
-      for (const r of await rows<{ pool: string }>("SELECT pool FROM pools FINAL WHERE verified = 1 AND pool IN {p:Array(String)}", { p: cp.slice(j, j + 1_000) })) ver.add(r.pool);
-    const best = new Map<string, { c: number; v: number }>();
-    for (const c of cs) {
-      if (!ver.has(c.pool) || !(Number(c.c) > 0)) continue;
-      const k = `${c.token}.${c.m}`, b = best.get(k);
-      if (!b || Number(c.v) > b.v) best.set(k, { c: Number(c.c), v: Number(c.v) });
-      const t = bUsd.get(c.token) ?? bUsd.set(c.token, { keys: [], at: new Map(), vol: 0 }).get(c.token)!;
-      t.vol += Number(c.v);
-    }
-    for (const [k, b] of best) { const [t, m] = k.split("."); bUsd.get(t)!.at.set(Number(m), b.c); }
-  }
-  for (const b of bUsd.values()) b.keys = [...b.at.keys()].sort((x, y) => x - y);
-  const bridgesAt = (t: number, pl: Pool) => {
-    const out = new Map<string, Bridge>();
-    for (const tok of [pl.token0, pl.token1]) {
-      const b = bUsd.get(tok);
-      const k = b && lastAtOrBefore(b.keys, t - (t % 60));
-      if (k != null && t - k <= 86_400) out.set(tok, { dec: decimals.get(tok)!, usd: b!.at.get(k)!, vol: b!.vol });
-    }
-    return out;
-  };
+  const { bridgesAt, priced: bPriced } = await loadBridges(bridged, from, to, decimals);
   const byTx = <T extends { block: string; tx_index: number }>(xs: T[]) => {
     const m = new Map<string, T[]>();
     for (const x of xs) { const k = `${x.block}.${x.tx_index}`; (m.get(k) ?? m.set(k, []).get(k)!).push(x); }
@@ -122,7 +129,7 @@ async function main(from: number, to: number) {
   const relays = byTx(await rows<{ block: string; tx_index: number; tx_hash: string; ts: number; recipient: string; token: string; amount: string; usdg_in: string; weth_in: string }>(
     `SELECT DISTINCT block, tx_index, tx_hash, ts, recipient, token, amount, usdg_in, weth_in FROM (${both("block, tx_index, tx_hash, toUnixTimestamp(time) AS ts, recipient, token, toString(amount) AS amount, toString(usdg_in) AS usdg_in, toString(weth_in) AS weth_in",
       "kept_relay", "ev_relay", `sign = 1 AND ${win}`)})`, p));
-  console.error(`[hist-trades] ${from}..${to}: ${ps.length} pools (${pools.size} resolved, ${v23.length} v2/v3 looked up), ETH/USD in ${ethKeys.length} minutes, ${bUsd.size}/${bridged.length} bridge tokens priced, ${ops.size} userOp txs, ${relays.size} Relay fills`);
+  console.error(`[hist-trades] ${from}..${to}: ${ps.length} pools (${pools.size} resolved, ${v23.length} v2/v3 looked up), ETH/USD in ${ethKeys.length} minutes, ${bPriced}/${bridged.length} bridge tokens priced, ${ops.size} userOp txs, ${relays.size} Relay fills`);
 
   // swaps and transfers, each sorted by tx: walk them together
   const swaps = sorted<Swap>(`SELECT * FROM (${both("block, tx_index, log_index, tx_hash, toUnixTimestamp(time) AS ts, venue, pool, toString(amount0) AS a0, toString(amount1) AS a1, toString(sqrt_price_x96) AS sqrt, tx_from",

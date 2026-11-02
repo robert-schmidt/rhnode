@@ -4,14 +4,17 @@
 // first two hex digits, each in key order: one read of the range in all (~22 GiB for Sep–Oct, measured), and the same
 // batches on a re-run, so a slice redone after a crash is dropped by the dedup tokens instead of counted twice.
 // ETH/USD: per ETH_BUCKET blocks, the median of ≥ $100 ETH/USDG swaps in verified pools, carried forward (the live
-// projector takes it per tick range). Runs in the "bulk" workload. ponytail: pools the projector never resolved (traded
-// only before go-live: ~5% of the swaps, sampled) and token/token pools (bridged prices) get no candles here.
-// `node src/tools/hist-candles.ts [from-date]` (default 2026-09-01) up to go-live; resumes at ctl_cursors 'hist_candles'.
+// projector takes it per tick range). Runs in the "bulk" workload. Token/token pools and pools resolved after that run
+// got no candles in it: `--missing` adds them, the pools with swaps before go-live and no candle before it, a day at a
+// time, token/token pools priced through bridges (hist-trades.ts loadBridges), ETH/USD from the candles it made.
+// `node src/tools/hist-candles.ts [--missing] [from-date]` (default 2026-09-01) up to go-live; the full run resumes at
+// ctl_cursors 'hist_candles', --missing at 'hist_candles_missing' (the next day).
 import { createClient } from "@clickhouse/client";
 import { cfg } from "../config.ts";
 import { ch, insert, rows, workload } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 import { priceSwap, QUOTE_DECIMALS, sides, type Swap } from "../projector/prices.ts";
+import { atOrBefore, loadBridges } from "./hist-trades.ts";
 
 const ETH_BUCKET = 1_000, FLUSH = 50_000;
 type Row = Swap & { block: string; tx_index: number; log_index: number; tx_hash: string; time: string; pool: string; tx_from: string; verified: number };
@@ -106,7 +109,72 @@ async function main(fromDate: string) {
   console.log(`[hist-candles] done: ${swaps} swaps, ${priced} priced, ${Math.round((Date.now() - t0) / 1000)} s`);
 }
 
+/** The pools left out of the full run, priced a day at a time. */
+async function missing(fromDate: string) {
+  const from = Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000);
+  const [g] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'golive'");
+  const [gt] = await rows<{ t: number }>("SELECT toUnixTimestamp(min(time)) AS t FROM ev_swaps WHERE block >= {g:UInt64} AND block < {g:UInt64} + 1000", { g: g.block });
+  const golive = Number(gt.t), r = { from, g: g.block, gt: golive };
+  const traded = await rows<{ pool: string }>("SELECT DISTINCT pool FROM kept_swaps WHERE time >= toDateTime({from:UInt32}) AND block < {g:UInt64} AND venue != 'curve'", r);
+  const candled = new Set((await rows<{ pool: string }>(
+    "SELECT DISTINCT pool FROM agg_candles_1m WHERE minute >= toDateTime({from:UInt32}) AND minute < toDateTime({gt:UInt32})", r)).map((x) => x.pool));
+  const want = traded.map((x) => x.pool).filter((x) => !candled.has(x));
+  const pools = new Map<string, PoolRow>();
+  for (let i = 0; i < want.length; i += 1_000)
+    for (const p of await rows<PoolRow>("SELECT pool, token0, token1, verified FROM pools FINAL WHERE ok = 1 AND pool IN {p:Array(String)}", { p: want.slice(i, i + 1_000) }))
+      if (!(p.token0 in QUOTE_DECIMALS && p.token1 in QUOTE_DECIMALS)) pools.set(p.pool, p);
+  const decimals = new Map<string, number>(Object.entries(QUOTE_DECIMALS));
+  const toks = [...new Set([...pools.values()].flatMap((p) => [p.token0, p.token1]))].filter((t) => !decimals.has(t));
+  for (let i = 0; i < toks.length; i += 1_000)
+    for (const d of await rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE decimals >= 0 AND token IN {t:Array(String)}", { t: toks.slice(i, i + 1_000) }))
+      decimals.set(d.token, d.decimals);
+  const bridged = [...new Set([...pools.values()].filter((p) => !(p.token0 in QUOTE_DECIMALS) && !(p.token1 in QUOTE_DECIMALS)).flatMap((p) => [p.token0, p.token1]))].filter((t) => decimals.has(t));
+  const ids = [...pools.keys()].sort();
+  console.log(`[hist-candles --missing] ${traded.length} pools traded before go-live, ${want.length} without candles, ${pools.size} resolved (${bridged.length} bridge tokens)`);
+  const [c] = await rows<{ block: string; hash: string }>("SELECT block, hash FROM ctl_cursors FINAL WHERE name = 'hist_candles_missing'");
+  const long = createClient({ ...cfg.clickhouse, request_timeout: 3_600_000, clickhouse_settings: { workload: "bulk", max_threads: 2 } });
+  let swaps = 0, priced = 0;
+  const t0 = Date.now();
+  for (let d = c?.hash === fromDate ? Number(c.block) : from; d < golive; d += 86_400) {
+    const e = Math.min(d + 86_400, golive);
+    const eth = new Map((await rows<{ m: number; c: number }>(
+      `SELECT toUnixTimestamp(minute) AS m, argMax(c, v) AS c FROM (SELECT minute, pool, argMaxMerge(close) AS c, sum(volume_usd) AS v FROM agg_candles_1m
+       WHERE token IN ({w:String}, {n:String}) AND quote = {u:String} AND minute >= toDateTime({d:UInt32}) - INTERVAL 1 DAY AND minute < toDateTime({e:UInt32})
+       GROUP BY minute, pool) GROUP BY m`, { d, e, w: WETH, n: NATIVE_ETH, u: USDG })).map((x) => [Number(x.m), Number(x.c)]));
+    const ek = [...eth.keys()].sort((a, b) => a - b);
+    const { bridgesAt } = await loadBridges(bridged, d, e, decimals);
+    for (let i = 0; i < ids.length; i += 1_000) {
+      const rs = await long.query({
+        query: `SELECT ${SWAP_COLS}, toUnixTimestamp(s.time) AS ts FROM kept_swaps AS s FINAL
+          WHERE s.pool IN {p:Array(String)} AND s.time >= toDateTime({d:UInt32}) AND s.time < toDateTime({e:UInt32}) AND s.block < {g:UInt64} AND s.sign = 1
+          ORDER BY s.pool, s.block, s.log_index`,
+        query_params: { ...r, d, e, p: ids.slice(i, i + 1_000) }, format: "JSONEachRow",
+      });
+      const out = [];
+      for await (const chunk of rs.stream()) for (const row of chunk) {
+        const s = { ...row.json<Row & { ts: number }>(), ...pools.get(row.json<Row>().pool)! }, ts = Number(s.ts);
+        const br = !(s.token0 in QUOTE_DECIMALS) && !(s.token1 in QUOTE_DECIMALS) ? bridgesAt(ts, s) : undefined;
+        const e1 = atOrBefore(ek, eth, ts - (ts % 60)), p = priceSwap(s, decimals.get(sides(s.token0, s.token1, br)?.token ?? ""), e1, br);
+        swaps++;
+        if (!p) continue;
+        out.push({
+          block: s.block, tx_index: s.tx_index, log_index: s.log_index, tx_hash: s.tx_hash, time: s.time, pool: s.pool, venue: s.venue,
+          token: p.token, quote: p.quote, token_delta: p.tokenDelta.toString(), quote_delta: p.quoteDelta.toString(),
+          quote_amount: p.quoteAmount, usd: p.usd, price: p.price, price_usd: p.priceUsd, eth_usd: e1 ?? 0,
+          tx_from: s.tx_from, verified: s.verified, sign: 1,
+        });
+      }
+      await insert("hist_prices", out, `hist-candles-missing:${fromDate}:${d}:${i}`);
+      priced += out.length;
+    }
+    await ch.insert({ table: "ctl_cursors", values: [{ name: "hist_candles_missing", block: d + 86_400, hash: fromDate, version: Date.now() }], format: "JSONEachRow" });
+    console.log(JSON.stringify({ at: new Date().toISOString(), day: new Date(d * 1000).toISOString().slice(0, 10), swaps, priced, s: Math.round((Date.now() - t0) / 1000) }));
+  }
+  console.log(`[hist-candles --missing] done: ${swaps} swaps, ${priced} priced, ${Math.round((Date.now() - t0) / 1000)} s`);
+}
+
 if (import.meta.main) {
-  await workload.run("bulk", () => main(process.argv[2] ?? "2026-09-01"));
+  const args = process.argv.slice(2), miss = args[0] === "--missing", date = (miss ? args[1] : args[0]) ?? "2026-09-01";
+  await workload.run("bulk", () => (miss ? missing(date) : main(date)));
   process.exit(0); // own exit: open sockets would keep a one-off alive
 }
