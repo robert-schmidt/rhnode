@@ -26,9 +26,10 @@ const FLUSH = 50_000, DRY = process.env.DRY === "1";
 // each spills its sort to disk past 100 MB in 16K-row blocks and may use 1.2 GB (600 MB failed while reading the
 // transfers' amounts), and is cancelled when the tool goes away (a stopped run must not leave its reads going).
 // ClickHouse 26.3's default max_bytes_ratio_before_external_sort (0.5) wins over the byte threshold: it never spilled
-// (0 parts, a day failed at 1.2 GB) until the ratio was 0 (2026-11-02, an hour's transfers: 9 parts).
+// (0 parts, a day failed at 1.2 GB) until the ratio was 0 (2026-11-02, an hour's transfers: 9 parts). The two streams
+// are read in step, so one can sit unread while the other is walked: past 30 s (the default send timeout) the server dropped it.
 const SORTED = { workload: "bulk", max_threads: 2, max_memory_usage: "1200000000", max_bytes_before_external_sort: "100000000",
-  max_bytes_ratio_before_external_sort: 0, max_block_size: 16384,
+  max_bytes_ratio_before_external_sort: 0, max_block_size: 16384, http_send_timeout: 3600,
   cancel_http_readonly_queries_on_client_close: 1 };
 type Swap = { block: string; tx_index: number; log_index: number; tx_hash: string; ts: number; venue: "v2" | "v3" | "v4"; pool: string; a0: string; a1: string; sqrt: string; tx_from: string };
 type Transfer = { block: string; tx_index: number; log_index: number; batch_index: number; token: string; from: string; to: string; amount: string };
