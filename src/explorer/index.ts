@@ -166,7 +166,8 @@ ${o.login || o.token ? "" : html`<p class="muted small">Why sign in? It costs no
 <h2>Get a token</h2>
 <ol class="steps">
 ${cfg.explorer.requireStar ? html`<li>Star the repository <a href="${REPO}" rel="noopener" target="_blank">${REPO_NAME}</a>.</li>` : ""}
-<li>Open an issue there containing your code <span class="tag">${CODE_PREFIX}${code}</span>: <a href="${issue}" rel="noopener" target="_blank">open it prefilled</a>.</li>
+<li>Open an issue there containing your code <span class="tag">${CODE_PREFIX}${code}</span>: <a href="${issue}" rel="noopener" target="_blank">open it prefilled</a>.
+Opened one before (open or closed)? Just comment the code on it instead.</li>
 <li>Come back and <form method="post" action="/access/claim" class="inline"><button>get my token</button></form></li>
 </ol>
 <p class="muted small">The code works only in this browser, for a day. Your token is shown here and never posted on GitHub.</p>
