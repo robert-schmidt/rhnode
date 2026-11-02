@@ -144,6 +144,106 @@ const ticks = new Map<string, { at: number; tick: number; lo: number; hi: number
 const mc = (up: Up, cs: Call[]) => Promise.all(Array.from({ length: Math.ceil(cs.length / 500) }, (_, i) => cs.slice(i * 500, i * 500 + 500))
   .map((c) => multicall(up, c).catch(() => c.map(() => null)))).then((r) => r.flat());
 
+type Tip = { pool: string; venue: string; token0: string; token1: string; spacing: number };
+// multicall answers: a tuple (getReserves, slot0, getSlot0) or a bigint (liquidity, balanceOf), undefined on failure
+type Raw = (readonly bigint[] & bigint) | undefined;
+type State = { w: (k: number) => Raw; band?: [number, number] };
+
+/** Bridge prices: a token's last USD price in the hour from ≥ $100 swaps in verified quote pools, with ≥ $1,000 of them
+ *  (the projector's bridge rule), and its decimals; a pool against a non-quote token (a launch paired with a tokenised
+ *  stock) is priced through it */
+async function bridgeUsd(via: string[]): Promise<Map<string, { usd: number; dec: number }>> {
+  const [bp, bd] = via.length ? await Promise.all([
+    rows<{ token: string; pu: number }>(
+      `SELECT token, argMax(price_usd, (block, log_index)) AS pu FROM ev_prices WHERE token IN {b:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String})
+       AND verified = 1 AND usd >= 100 AND sign = 1 AND time >= now() - INTERVAL 1 HOUR GROUP BY token HAVING sum(usd) >= 1000`, { b: via, w: WETH, n: NATIVE_ETH, u: USDG }),
+    rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE token IN {b:Array(String)}", { b: via }),
+  ]) : [[], []];
+  const bdec = new Map(bd.map((r) => [r.token, r.decimals]));
+  return new Map(bp.filter((r) => (bdec.get(r.token) ?? -1) >= 0).map((r) => [r.token, { usd: Number(r.pu), dec: bdec.get(r.token)! }]));
+}
+
+/** Pools' state at the tip by pool: one multicall (a curve's balance of `quote`), then for v3/v4 the amounts their
+ *  liquidity holds in the band */
+async function tipState(up: Up, ps: (Tip & { quote: string })[]): Promise<Map<string, State>> {
+  const calls: Call[] = [], slots = new Map<string, number>();
+  for (const p of ps) {
+    if (slots.has(p.pool)) continue;
+    slots.set(p.pool, calls.length);
+    if (p.venue === "v2") calls.push({ target: p.pool, abi: V2, fn: "getReserves" });
+    else if (p.venue === "curve") { const q = p.quote;
+      calls.push(q === NATIVE_ETH || !q ? { target: MULTICALL3, abi: MC3, fn: "getEthBalance", args: [p.pool] } : { target: q, abi: ERC20, fn: "balanceOf", args: [p.pool] }); }
+    else if (p.venue === "omm") calls.push({ target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
+    else if (p.venue === "v3") calls.push({ target: p.pool, abi: V3, fn: "slot0" }, { target: p.pool, abi: V3, fn: "liquidity" },
+      { target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
+    else calls.push({ target: V4_STATE_VIEW, abi: SV, fn: "getSlot0", args: [p.pool] }, { target: V4_STATE_VIEW, abi: SV, fn: "getLiquidity", args: [p.pool] });
+  }
+  const res = await mc(up, calls);
+  const at = (pool: string, k: number) => (res[slots.get(pool)! + k] ?? undefined) as Raw;
+
+  // v3/v4: the tick bitmap words around the price, then the liquidityNet of every initialized tick found in the band.
+  // Positions change far less often than the price, so a pool's ticks are reused for 2 minutes (or until its tick moves
+  // a tenth of the band); price, tick and active liquidity are read fresh every time. A cold batch of 120 tokens took
+  // 84 eth_calls of ~320K calldata words (a spacing-1 pool needs 721 bitmap words), 4.3 s on a busy node (2026-10-31).
+  const now = Date.now(), live = ps.filter((p, i) => ps.findIndex((x) => x.pool === p.pool) === i && p.venue !== "v2" && p.spacing > 0 && at(p.pool, 0) && at(p.pool, 1) != null);
+  const fresh = (p: Tip) => { const c = ticks.get(p.pool); return c && now - c.at < 120_000 && Math.abs(Number(at(p.pool, 0)![1]) - c.tick) < BAND / 10 ? c : null; };
+  const walks = live.filter((p) => !fresh(p)).map((p) => {
+    const tick = Number(at(p.pool, 0)![1]), lo = Math.max(-MAX_TICK, tick - BAND), hi = Math.min(MAX_TICK, tick + BAND);
+    const word = (t: number) => Math.floor(t / p.spacing) >> 8, words: number[] = [];
+    for (let w = word(lo); w <= word(hi); w++) words.push(w);
+    return { p, tick, lo, hi, words, ticks: [] as number[], net: new Map<number, bigint>(), ok: true };
+  });
+  const v4 = (p: Tip) => p.venue === "v4";
+  const bms = await mc(up, walks.flatMap(({ p, words }) => words.map((w): Call =>
+    v4(p) ? { target: V4_STATE_VIEW, abi: SV, fn: "getTickBitmap", args: [p.pool, w] } : { target: p.pool, abi: V3, fn: "tickBitmap", args: [w] })));
+  let k = 0;
+  for (const wk of walks) for (const w of wk.words) {
+    const bm = bms[k++] as bigint | null;
+    if (bm == null) { wk.ok = false; continue; }
+    for (let b = 0; b < 256; b++) if ((bm >> BigInt(b)) & 1n) {
+      const t = (w * 256 + b) * wk.p.spacing;
+      if (t > wk.lo && t < wk.hi) wk.ticks.push(t);
+    }
+  }
+  const tls = await mc(up, walks.flatMap(({ p, ticks }) => ticks.map((t): Call =>
+    v4(p) ? { target: V4_STATE_VIEW, abi: SV, fn: "getTickLiquidity", args: [p.pool, t] } : { target: p.pool, abi: V3, fn: "ticks", args: [t] })));
+  k = 0;
+  for (const wk of walks) {
+    for (const t of wk.ticks) { const r = tls[k++] as readonly bigint[] | null; if (r == null) wk.ok = false; else wk.net.set(t, r[1]); }
+    if (wk.ok) ticks.set(wk.p.pool, { at: now, tick: wk.tick, lo: wk.lo, hi: wk.hi, net: wk.net });
+  }
+  if (ticks.size > 20_000) ticks.clear();
+  const bands = new Map<string, [number, number]>();
+  for (const p of live) {
+    const c = fresh(p), tick = Number(at(p.pool, 0)![1]);
+    if (c) bands.set(p.pool, band(at(p.pool, 0)![0], tick, at(p.pool, 1)!, c.net, Math.max(c.lo, tick - BAND), Math.min(c.hi, tick + BAND)));
+  }
+
+  return new Map(ps.map((p) => [p.pool, { w: (k: number) => at(p.pool, k), band: bands.get(p.pool) }]));
+}
+
+/** poolState's input from a pool's state at the tip; `last`: its last price (curve, omm) */
+const stOf = (venue: string, s: State, last: number | null) => venue === "v2" ? { r0: s.w(0)?.[0], r1: s.w(0)?.[1] }
+  : venue === "curve" ? { q: s.w(0) as bigint | undefined, last } : venue === "omm" ? { b0: s.w(0) as bigint | undefined, b1: s.w(1) as bigint | undefined, last }
+  : { sqrt: s.w(0)?.[0], L: s.w(1) as bigint | undefined, b0: s.w(2) as bigint | undefined, b1: s.w(3) as bigint | undefined, band: s.band };
+
+/** Depth at the tip of `token`'s pools by pool, each from its side (what a seller of it meets): the other token is the
+ *  quote, in USD as a quote asset or through its bridge price; null when that has no price. ponytail: a few hundred
+ *  pools at most (their quotes travel in the URL), callers cap the list */
+export async function depths(up: Up, token: string, ps: Tip[]): Promise<Map<string, Mid | null>> {
+  const other = (p: Tip) => (p.token0 === token ? p.token1 : p.token0);
+  const [eu, B, [m], last, tip] = await Promise.all([eth(), bridgeUsd([...new Set(ps.map(other))].filter((q) => !(q in QUOTE_DECIMALS))),
+    rows<{ decimals: number }>("SELECT decimals FROM serve_tokens FINAL WHERE token = {t:String}", { t: token }),
+    rows<{ pool: string; pn: number }>(`SELECT pool, argMaxMerge(close_usd) AS pn FROM agg_candles_1m WHERE token = {t:String}
+      AND minute >= now() - INTERVAL 14 DAY GROUP BY pool`, { t: token }),
+    tipState(up, ps.map((p) => ({ ...p, quote: other(p) })))]);
+  const L = new Map(last.map((r) => [r.pool, Number(r.pn)])), dt = m && m.decimals >= 0 ? m.decimals : null;
+  return new Map(ps.map((p) => {
+    const q = other(p), b = B.get(q), qUsd = q === USDG ? 1 : q in QUOTE_DECIMALS ? eu : b?.usd ?? null, dq = QUOTE_DECIMALS[q] ?? b?.dec, pn = L.get(p.pool);
+    return [p.pool, qUsd == null || dq == null ? null : poolState(p.venue, p.token0 === token, dt, dq, qUsd, stOf(p.venue, tip.get(p.pool)!, pn ? pn / qUsd : null))];
+  }));
+}
+
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const t = tokens;
   const [meta, launches, cands, trades, vols, eu, [tip], tops] = await Promise.all([
@@ -200,77 +300,16 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
          ORDER BY b DESC LIMIT 10 BY token) GROUP BY token ${BY_TOKEN}`, { t: full, x: exclude }),
   ]) : [[], []];
 
-  // A main pool against a non-quote token (a launch paired with a tokenised stock) is priced through it: its last USD
-  // price in the hour from ≥ $100 swaps in verified quote pools, with ≥ $1,000 of them (the projector's bridge rule)
   const other = (p: Pool) => (p.token0 === p.token ? p.token1 : p.token0);
-  const via = [...new Set([...P.values()].filter((p) => !sides(p.token0, p.token1)).map(other))];
-  const [bp, bd] = via.length ? await Promise.all([
-    rows<{ token: string; pu: number }>(
-      `SELECT token, argMax(price_usd, (block, log_index)) AS pu FROM ev_prices WHERE token IN {b:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String})
-       AND verified = 1 AND usd >= 100 AND sign = 1 AND time >= now() - INTERVAL 1 HOUR GROUP BY token HAVING sum(usd) >= 1000`, { b: via, w: WETH, n: NATIVE_ETH, u: USDG }),
-    rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE token IN {b:Array(String)}", { b: via }),
-  ]) : [[], []];
-  const bdec = new Map(bd.map((r) => [r.token, r.decimals]));
-  const B = new Map(bp.filter((r) => (bdec.get(r.token) ?? -1) >= 0).map((r) => [r.token, { usd: Number(r.pu), dec: bdec.get(r.token)! }]));
+  const B = await bridgeUsd([...new Set([...P.values()].filter((p) => !sides(p.token0, p.token1)).map(other))]);
   const sideOf = (p: Pool) => sides(p.token0, p.token1) ?? (B.has(other(p)) ? { token: p.token, quote: other(p), tokenIs0: p.token0 === p.token } : null);
 
-  // The main pools' state at the tip, one multicall
-  const calls: Call[] = [], slots = new Map<string, number>();
-  for (const p of P.values()) {
-    slots.set(p.token, calls.length);
-    if (p.venue === "v2") calls.push({ target: p.pool, abi: V2, fn: "getReserves" });
-    else if (p.venue === "curve") { const q = other(p);
-      calls.push(q === NATIVE_ETH || !q ? { target: MULTICALL3, abi: MC3, fn: "getEthBalance", args: [p.pool] } : { target: q, abi: ERC20, fn: "balanceOf", args: [p.pool] }); }
-    else if (p.venue === "omm") calls.push({ target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
-    else if (p.venue === "v3") calls.push({ target: p.pool, abi: V3, fn: "slot0" }, { target: p.pool, abi: V3, fn: "liquidity" },
-      { target: p.token0, abi: ERC20, fn: "balanceOf", args: [p.pool] }, { target: p.token1, abi: ERC20, fn: "balanceOf", args: [p.pool] });
-    else calls.push({ target: V4_STATE_VIEW, abi: SV, fn: "getSlot0", args: [p.pool] }, { target: V4_STATE_VIEW, abi: SV, fn: "getLiquidity", args: [p.pool] });
-  }
-  const [res, ago] = await Promise.all([mc(up, calls), P.size ? rows<{ token: string; pool: string; pn: number; p1: number; p6: number; p24: number }>(
+  const [state, ago] = await Promise.all([tipState(up, [...P.values()].map((p) => ({ ...p, quote: other(p) }))), P.size ? rows<{ token: string; pool: string; pn: number; p1: number; p6: number; p24: number }>(
     `SELECT token, pool, argMaxMerge(close_usd) AS pn, argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 HOUR) AS p1, argMaxMergeIf(close_usd, minute < now() - INTERVAL 6 HOUR) AS p6,
        argMaxMergeIf(close_usd, minute < now() - INTERVAL 1 DAY) AS p24 FROM agg_candles_1m
      WHERE token IN {t:Array(String)} AND pool IN {p:Array(String)} AND minute >= now() - INTERVAL 14 DAY GROUP BY token, pool`,
     { t: [...P.keys()], p: [...P.values()].map((p) => p.pool) }) : []]);
   const AGO = new Map(ago.filter((r) => P.get(r.token)?.pool === r.pool).map((r) => [r.token, r]));
-  const at = (tk: string, k: number) => (res[slots.get(tk)! + k] ?? undefined) as (readonly bigint[] & bigint) | undefined;
-
-  // v3/v4: the tick bitmap words around the price, then the liquidityNet of every initialized tick found in the band.
-  // Positions change far less often than the price, so a pool's ticks are reused for 2 minutes (or until its tick moves
-  // a tenth of the band); price, tick and active liquidity are read fresh every time. A cold batch of 120 tokens took
-  // 84 eth_calls of ~320K calldata words (a spacing-1 pool needs 721 bitmap words), 4.3 s on a busy node (2026-10-31).
-  const now = Date.now(), live = [...P.values()].filter((p) => p.venue !== "v2" && p.spacing > 0 && at(p.token, 0) && at(p.token, 1) != null);
-  const fresh = (p: Pool) => { const c = ticks.get(p.pool); return c && now - c.at < 120_000 && Math.abs(Number(at(p.token, 0)![1]) - c.tick) < BAND / 10 ? c : null; };
-  const walks = live.filter((p) => !fresh(p)).map((p) => {
-    const tick = Number(at(p.token, 0)![1]), lo = Math.max(-MAX_TICK, tick - BAND), hi = Math.min(MAX_TICK, tick + BAND);
-    const word = (t: number) => Math.floor(t / p.spacing) >> 8, words: number[] = [];
-    for (let w = word(lo); w <= word(hi); w++) words.push(w);
-    return { p, tick, lo, hi, words, ticks: [] as number[], net: new Map<number, bigint>(), ok: true };
-  });
-  const v4 = (p: Pool) => p.venue === "v4";
-  const bms = await mc(up, walks.flatMap(({ p, words }) => words.map((w): Call =>
-    v4(p) ? { target: V4_STATE_VIEW, abi: SV, fn: "getTickBitmap", args: [p.pool, w] } : { target: p.pool, abi: V3, fn: "tickBitmap", args: [w] })));
-  let k = 0;
-  for (const wk of walks) for (const w of wk.words) {
-    const bm = bms[k++] as bigint | null;
-    if (bm == null) { wk.ok = false; continue; }
-    for (let b = 0; b < 256; b++) if ((bm >> BigInt(b)) & 1n) {
-      const t = (w * 256 + b) * wk.p.spacing;
-      if (t > wk.lo && t < wk.hi) wk.ticks.push(t);
-    }
-  }
-  const tls = await mc(up, walks.flatMap(({ p, ticks }) => ticks.map((t): Call =>
-    v4(p) ? { target: V4_STATE_VIEW, abi: SV, fn: "getTickLiquidity", args: [p.pool, t] } : { target: p.pool, abi: V3, fn: "ticks", args: [t] })));
-  k = 0;
-  for (const wk of walks) {
-    for (const t of wk.ticks) { const r = tls[k++] as readonly bigint[] | null; if (r == null) wk.ok = false; else wk.net.set(t, r[1]); }
-    if (wk.ok) ticks.set(wk.p.pool, { at: now, tick: wk.tick, lo: wk.lo, hi: wk.hi, net: wk.net });
-  }
-  if (ticks.size > 20_000) ticks.clear();
-  const bands = new Map<string, [number, number]>();
-  for (const p of live) {
-    const c = fresh(p), tick = Number(at(p.token, 0)![1]);
-    if (c) bands.set(p.token, band(at(p.token, 0)![0], tick, at(p.token, 1)!, c.net, Math.max(c.lo, tick - BAND), Math.min(c.hi, tick + BAND)));
-  }
 
   const out = new Map<string, Card>();
   for (const tk of t) {
@@ -284,13 +323,8 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     let main: Card | null = null;
     const p = P.get(tk), sd = p && sideOf(p);
     if (p && sd && sd.token === tk) {
-      // multicall answers: a tuple (getReserves, slot0, getSlot0) or a bigint (liquidity, balanceOf), null on failure
-      const w = (k: number) => at(tk, k);
       const b = B.get(sd.quote), qUsd = sd.quote === USDG ? 1 : b ? b.usd : eu, pn = AGO.get(tk)?.pn;
-      const st = p.venue === "v2" ? { r0: w(0)?.[0], r1: w(0)?.[1] } : p.venue === "curve" ? { q: w(0) as bigint | undefined, last: pn && qUsd ? pn / qUsd : null }
-        : p.venue === "omm" ? { b0: w(0) as bigint | undefined, b1: w(1) as bigint | undefined, last: pn && qUsd ? pn / qUsd : null }
-        : { sqrt: w(0)?.[0], L: w(1), b0: w(2), b1: w(3), band: bands.get(tk) };
-      const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote] ?? b!.dec, qUsd, st);
+      const ms = poolState(p.venue, sd.tokenIs0, dec, QUOTE_DECIMALS[sd.quote] ?? b!.dec, qUsd, stOf(p.venue, state.get(p.pool)!, pn && qUsd ? pn / qUsd : null));
       main = {
         pool: p.pool, venue: p.venue, quote: sd.quote, quote_via: b ? sd.quote : null, verified: p.verified === 1, official: p.official === 1, created_block: Number(p.created_block) || null,
         price: ms?.price ?? null, price_usd: ms?.price != null && qUsd != null ? ms.price * qUsd : null,
