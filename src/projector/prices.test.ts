@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { priceSwap, sides } from "./prices.ts";
+import { execUsd, priceSwap, sides } from "./prices.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
 const TOKEN = "0x1111111111111111111111111111111111111111";
@@ -61,4 +61,11 @@ test("bridges: a token/token pool is priced through the side with its own quote-
   // v2 sell of 1,000 TOKEN for 2 GME (pool-side amounts): 0.002 GME a token, $0.05; $50 moved
   const p = priceSwap({ venue: "v2", a0: (10n ** 21n).toString(), a1: (-2n * 10n ** 18n).toString(), sqrt: "0", token0: TOKEN, token1: GME }, 18, 3000, b)!;
   assert.equal(p.quote, GME); assert.ok(Math.abs(p.price - 0.002) < 1e-12); assert.ok(Math.abs(p.priceUsd - 0.05) < 1e-12); assert.ok(Math.abs(p.usd - 50) < 1e-9);
+});
+
+test("execUsd: a bridge's USD per token is what the swap paid, not the price a drained v4 range is left at", () => {
+  // $200 of USDG for 4M tokens (18 dec) leaves the pool's sqrtPrice at the tick limit: priceUsd is absurd, execUsd isn't
+  const p = priceSwap({ venue: "v4", a0: (4n * 10n ** 24n).toString(), a1: "-200000000", sqrt: "1461446703485210103287273052203988822378723970341", token0: TOKEN, token1: USDG }, 18, 3000)!;
+  assert.ok(p.priceUsd > 1e30);
+  close(execUsd(p.usd, p.tokenDelta, 18), 0.00005);
 });
