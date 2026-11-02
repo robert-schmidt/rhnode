@@ -3,7 +3,7 @@
 // lags the head and doesn't have the block yet) only rests it briefly. Never logs a URL, only
 // its host: a URL can carry a key.
 import type { Upstream } from "../config.ts";
-import { isNitro, nitroSynced, watchNitro } from "./nitro.ts";
+import { isNitro, nitro, nitroSynced, watchNitro } from "./nitro.ts";
 
 type Ep = { host: string; url: string; rps: number; tokens: number; at: number; downUntil: number; fails: number; ok: number; err: number; nulls: number };
 
@@ -16,25 +16,28 @@ export class RpcError extends Error {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** `ordered`: always the first endpoint that is up (failover), instead of spreading calls round-robin. A list with our
- *  node in it is always ordered, and the node is skipped while it isn't synced (src/chain/nitro.ts). */
+ *  node in it is always ordered, and the node is skipped while it isn't synced (src/chain/nitro.ts), except for a call
+ *  whose first param is a block number it already has: after the 2026-11-02 power-off (69K blocks), ingest read every
+ *  block from the official RPC at ~1,000 a minute while Nitro, already past it, sat idle. */
 export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?: number; ordered?: boolean } = {}) {
   if (!list.length) throw new Error("no upstream endpoints");
   const eps: Ep[] = list.map(({ url, rps }) => ({ host: new URL(url).host, url, rps, tokens: rps, at: Date.now(), downUntil: 0, fails: 0, ok: 0, err: 0, nulls: 0 }));
   const node = list.find((u) => isNitro(u.url));
   if (node) { watchNitro(node.url); opts = { ...opts, ordered: true }; }
-  const usable = (e: Ep) => !(node && eps.length > 1 && e.url === node.url && !nitroSynced());
+  // blk: the block a call reads (a hash parses past any head, so it never counts)
+  const usable = (e: Ep, blk: number) => !(node && eps.length > 1 && e.url === node.url && !nitroSynced() && !(blk <= (nitro.head ?? -1)));
   const attempts = opts.attempts ?? 30;
   let rr = 0;
   let id = 0;
 
-  async function take(): Promise<Ep> {
+  async function take(blk = Infinity): Promise<Ep> {
     for (;;) {
       const now = Date.now();
       for (let i = 0; i < eps.length; i++) {
         const e = eps[((opts.ordered ? 0 : rr) + i) % eps.length];
         e.tokens = Math.min(e.rps, e.tokens + ((now - e.at) / 1000) * e.rps);
         e.at = now;
-        if (e.downUntil <= now && e.tokens >= 1 && usable(e)) {
+        if (e.downUntil <= now && e.tokens >= 1 && usable(e, blk)) {
           e.tokens -= 1;
           rr = (rr + i + 1) % eps.length;
           return e;
@@ -47,8 +50,9 @@ export function upstream(list: Upstream[], opts: { timeoutMs?: number; attempts?
   /** A result, retried across endpoints. `null` counts as "not there yet". */
   async function call<T>(method: string, params: unknown[]): Promise<T> {
     let last: unknown;
+    const blk = typeof params[0] === "string" && /^0x[0-9a-f]+$/i.test(params[0]) ? Number(params[0]) : Infinity;
     for (let a = 0; a < attempts; a++) {
-      const e = await take();
+      const e = await take(blk);
       try {
         const res = await fetch(e.url, {
           method: "POST",
