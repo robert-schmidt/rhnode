@@ -9,6 +9,13 @@
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
+// A swap that drains a v3/v4 range leaves the pool at its tick limit (±887,272; BOOMER/USDG 2026-11-01: 3.4e50 USD, and a
+// bridge took it: two token/token pools got trades worth up to 4e57). Past ±800,000 (a raw price beyond 1e34 either way)
+// the price is what a swap of ≥ $1 paid; a smaller one is dust, what it "paid" is rounding, and it gets no price.
+// Measured 2026-11-02, 4.4M v3/v4 quote-pool swaps in 14 days: 337 past it (184 of ≥ $1, 210 tokens), 9 in 600K–800K.
+// What a swap paid isn't the price everywhere: some v4 hook pools move other amounts (a $450 swap "paid" 150× under).
+const LIMIT_TICK = 800_000;
+
 export const QUOTE_DECIMALS: Record<string, number> = { [USDG]: 6, [WETH]: 18, [NATIVE_ETH]: 18 };
 const isEth = (a: string) => a === WETH || a === NATIVE_ETH;
 
@@ -46,19 +53,20 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
   const tokenDelta = side.tokenIs0 ? d0 : d1, quoteDelta = side.tokenIs0 ? d1 : d0;
   if (tokenDelta === 0n) return null;
   const b = bridges?.get(side.quote), dq = QUOTE_DECIMALS[side.quote] ?? b!.dec;
-  let raw: number;
+  let raw: number, limit = false;
   const sqrt = Number(BigInt(s.sqrt));
   if (s.venue !== "v2" && sqrt > 0) {
     const r = sqrt / 2 ** 96;
     raw = side.tokenIs0 ? r * r : 1 / (r * r);
+    limit = Math.abs(Math.log(r * r) / Math.log(1.0001)) > LIMIT_TICK;
   } else raw = Math.abs(Number(quoteDelta) / Number(tokenDelta));
-  // A swap that empties a v3/v4 range leaves the pool's price at the tick limit (BOOMER/USDG 2026-11-01: 3.4e50 USD):
-  // more than 100× off what the swap paid, the price is what it paid. 201 of 4.6M priced swaps in 14 days, 125 tokens.
-  const exec = Math.abs(Number(quoteDelta) / Number(tokenDelta));
-  if (exec > 0 && (raw / exec > 100 || exec / raw > 100)) raw = exec;
-  const price = raw * 10 ** (tokenDecimals - dq);
   const quoteAmount = Math.abs(Number(quoteDelta)) / 10 ** dq;
   const toUsd = side.quote === USDG ? 1 : b ? b.usd : ethUsd ?? 0;
+  if (limit) {
+    if (quoteAmount * toUsd < 1) return null;
+    raw = Math.abs(Number(quoteDelta) / Number(tokenDelta));
+  }
+  const price = raw * 10 ** (tokenDecimals - dq);
   return { ...side, tokenDelta, quoteDelta, price, quoteAmount, priceUsd: price * toUsd, usd: quoteAmount * toUsd };
 }
 
@@ -141,36 +149,30 @@ async function priceRange(from: number, to: number, o: Only | undefined, fixedEt
  *  ponytail: never pruned (one entry per token ever priced, ~100K a month); prune by block if the process grows. */
 const lastUsd = new Map<string, { usd: number; block: number; vol: number }>();
 
-/** PURE. USD per token at a priced swap's execution (USD paid ÷ tokens moved), not the pool's price after it: a swap that
- *  empties a v3/v4 range leaves that at the tick limit, and a bridge took it (BOOMER/USDG 2026-11-01 17:42: 3.4e50, so
- *  two of its token/token pools got 28 swaps worth up to 4e57 USD). */
-export const execUsd = (usd: number, tokenDelta: bigint | string, dec: number) => usd / (Math.abs(Number(tokenDelta)) / 10 ** dec);
-
 /** The bridges for a range's token/token pools: either side priced against a quote asset in the range (verified pools,
- *  swaps ≥ $100, median of execUsd), else its last such price in the BRIDGE_BLOCKS before it. */
+ *  swaps ≥ $100, median), else its last such price in the BRIDGE_BLOCKS before it. */
 async function bridgesOf(from: number, swaps: (Swap & { block: string; verified: number })[], decimals: Map<string, number>): Promise<Map<string, Bridge>> {
   const here = new Map<string, number[]>();
   for (const s of swaps) {
     if (!s.verified) continue;
     const p = priceSwap(s, decimals.get(sides(s.token0, s.token1)?.token ?? ""), ethUsd);
     if (!p || p.usd < 100) continue;
-    const u = execUsd(p.usd, p.tokenDelta, decimals.get(p.token)!);
-    (here.get(p.token) ?? here.set(p.token, []).get(p.token)!).push(u);
+    (here.get(p.token) ?? here.set(p.token, []).get(p.token)!).push(p.priceUsd);
     const l = lastUsd.get(p.token);
-    lastUsd.set(p.token, { usd: u, block: Number(s.block), vol: (l?.vol ?? 0) + p.usd });
+    lastUsd.set(p.token, { usd: p.priceUsd, block: Number(s.block), vol: (l?.vol ?? 0) + p.usd });
   }
   const need = [...new Set(swaps.filter((s) => !(s.token0 in QUOTE_DECIMALS) && !(s.token1 in QUOTE_DECIMALS)).flatMap((s) => [s.token0, s.token1]))]
     .filter((t) => (decimals.get(t) ?? -1) >= 0);
   const cold = need.filter((t) => !here.has(t) && !lastUsd.has(t));
   for (let i = 0; i < cold.length; i += 300) { // query parameters travel in the URL
     const got = new Map((await rows<{ token: string; pu: number; vu: number; b: string }>(
-      `SELECT token, argMax(usd / abs(toFloat64(token_delta)), (block, log_index)) AS pu, sum(usd) AS vu, max(block) AS b FROM ev_prices
+      `SELECT token, argMax(price_usd, (block, log_index)) AS pu, sum(usd) AS vu, max(block) AS b FROM ev_prices
        WHERE token IN {t:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String}) AND verified = 1 AND usd >= 100 AND sign = 1
          AND block > {lo:UInt64} AND block <= {from:UInt64} GROUP BY token`,
       { t: cold.slice(i, i + 300), w: WETH, n: NATIVE_ETH, u: USDG, lo: Math.max(0, from - BRIDGE_BLOCKS), from })).map((r) => [r.token, r]));
     for (const t of cold.slice(i, i + 300)) {
       const r = got.get(t);
-      lastUsd.set(t, r ? { usd: Number(r.pu) * 10 ** decimals.get(t)!, block: Number(r.b), vol: Number(r.vu) } : { usd: 0, block: from, vol: 0 });
+      lastUsd.set(t, r ? { usd: Number(r.pu), block: Number(r.b), vol: Number(r.vu) } : { usd: 0, block: from, vol: 0 });
     }
   }
   const out = new Map<string, Bridge>();
