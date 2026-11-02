@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tradesOfTx } from "./trades.ts";
+import { unpricedLegs } from "./prices.ts";
 import { USDG, WETH } from "../chain/constants.ts";
 
 const A = "0x00000000000000000000000000000000000000a1", B = "0x00000000000000000000000000000000000000b2";
@@ -33,4 +34,17 @@ test("an ERC-4337 bundle: each userOp's sender owns the logs before its UserOper
     { wallet: A, token: TOKEN, amount: 100n, usd: 5, eth: 0.01, via: "userop" },
     { wallet: B, token: TOKEN, amount: -40n, usd: 2, eth: 0.01, via: "userop" },
   ]);
+});
+
+test("a swap without a price still makes the trade, worth unknown", () => {
+  const OTHER = "0x2222222222222222222222222222222222222222";
+  const legs = unpricedLegs({ venue: "v2", a0: "-500", a1: "40", sqrt: "0", token0: TOKEN, token1: OTHER, log_index: 3 });
+  assert.deepEqual(legs.map((l) => [l.token, l.token_delta, l.usd]), [[TOKEN, "500", null], [OTHER, "-40", null]]);
+  const t = tradesOfTx(A, [tr(1, OTHER, A, POOL, 40n), tr(2, TOKEN, POOL, A, 500n)], legs, []);
+  assert.deepEqual(t, [
+    { wallet: A, token: TOKEN, amount: 500n, usd: null, eth: null, via: "swap" },
+    { wallet: A, token: OTHER, amount: -40n, usd: null, eth: null, via: "swap" },
+  ]);
+  // a WETH/USDG-style pool of two quote assets has no token legs
+  assert.deepEqual(unpricedLegs({ venue: "v2", a0: "1", a1: "-1", sqrt: "0", token0: WETH, token1: USDG, log_index: 1 }), []);
 });

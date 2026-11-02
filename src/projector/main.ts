@@ -149,8 +149,9 @@ if (import.meta.main) {
     const t0 = Date.now();
     const pools = await resolvePools(up, lookup, last, to);
     const n = await project(up, last, to);
-    const prices = await derivePrices(last, to);
-    const trades = await deriveTrades(last, to);
+    const unpriced: Parameters<typeof deriveTrades>[3] = [];
+    const prices = await derivePrices(last, to, undefined, unpriced);
+    const trades = await deriveTrades(last, to, undefined, unpriced);
     if (!cLast) cLast = last;
     const cTo = Math.min(to, cLast + MAX_BLOCKS, cfg.traces === "tip" ? await cursor("trace") : to);
     const contracts = cTo > cLast ? await deriveContracts(up, cLast, cTo) : 0;

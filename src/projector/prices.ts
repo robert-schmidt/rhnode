@@ -3,7 +3,9 @@
 // A pool of two non-quote tokens (a launch paired with a tokenised stock) is priced through a bridge, never more than two
 // hops: the side with its own price against WETH/ETH/USDG in the range is the quote (both: the one with more such volume),
 // at the median of its ≥ $100 swaps in verified quote pools in the range, else its last such price in the BRIDGE_BLOCKS
-// before. Under BRIDGE_MIN_USD of that volume: no price, never a guess (rule shared with the app's onchain-market pricing).
+// before (a day: a thinly traded stock token is still priced through its own pool, the app's rule since 2026-11-02;
+// verified pools and ≥ $100 swaps keep decoys out). A swap left without a price still gives the projector its token
+// legs (unpricedLegs), so the trade exists with an unknown worth.
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
 
@@ -12,7 +14,7 @@ const isEth = (a: string) => a === WETH || a === NATIVE_ETH;
 
 /** A bridge quote for a range: its decimals, USD price and USD volume against a quote asset. */
 export type Bridge = { dec: number; usd: number; vol: number };
-const BRIDGE_BLOCKS = 20_000, BRIDGE_MIN_USD = 1_000; // ~35 min of chain
+const BRIDGE_BLOCKS = 830_000; // ~a day of chain
 
 /** The pool's token and quote side. An ETH/USDG pool prices ETH in USDG; WETH/ETH pools: null; token/token pools: the
  *  bridge side is the quote (both bridges: the one with more volume), null without one. */
@@ -56,6 +58,18 @@ export function priceSwap(s: Swap, tokenDecimals: number | undefined, ethUsd: nu
   return { ...side, tokenDelta, quoteDelta, price, quoteAmount, priceUsd: price * toUsd, usd: quoteAmount * toUsd };
 }
 
+/** A swap's token side for the trades: usd null when it has no price. */
+export type Leg = { log_index: number; token: string; quote: string; token_delta: string; usd: number | null; quote_amount: number };
+
+/** PURE. The legs of a swap that priceSwap left without a price: each side that isn't a quote asset, trader-side delta,
+ *  no worth. A WETH/ETH pool (both sides quote assets) has none. */
+export function unpricedLegs(s: Swap & { log_index: number }): Leg[] {
+  const flip = (a: string) => (s.venue === "v4" ? BigInt(a) : -BigInt(a));
+  return ([[s.token0, s.a0, s.token1], [s.token1, s.a1, s.token0]] as const)
+    .filter(([t, a]) => !(t in QUOTE_DECIMALS) && flip(a) !== 0n)
+    .map(([t, a, other]) => ({ log_index: s.log_index, token: t, quote: other, token_delta: flip(a).toString(), usd: null, quote_amount: 0 }));
+}
+
 let ethUsd: number | null = null;
 
 /** A backfill's subset (src/tools/venue-backfill.ts): one venue's swaps, or those of the given pools; tag names its dedup tokens. */
@@ -63,8 +77,9 @@ export type Only = { tag: string; venue?: "curve" | "omm"; pools?: string[] };
 export const onlySql = (o?: Only) => (!o ? "" : o.venue ? `AND venue = '${o.venue}'` : "AND pool IN {only_pools:Array(String)}");
 
 /** Price every swap in (from, to] whose pool is resolved; returns rows written. only: just that subset, priced at the
- *  ETH/USD the range already holds (its other swaps are priced already). */
-export async function derivePrices(from: number, to: number, only?: Only): Promise<number> {
+ *  ETH/USD the range already holds (its other swaps are priced already). unpriced: gets the legs of the swaps left
+ *  without a price, with their tx (deriveTrades takes them). */
+export async function derivePrices(from: number, to: number, only?: Only, unpriced?: (Leg & { tx_hash: string })[]): Promise<number> {
   if (only) {
     const [r] = await rows<{ p: number }>("SELECT eth_usd AS p FROM ev_prices WHERE block <= {to:UInt64} AND block > {from:UInt64} - 20000 AND eth_usd > 0 ORDER BY block DESC LIMIT 1", { from, to });
     return priceRange(from, to, only, Number(r?.p ?? 0) || null);
@@ -75,10 +90,10 @@ export async function derivePrices(from: number, to: number, only?: Only): Promi
       { w: WETH, n: NATIVE_ETH, u: USDG },
     ))[0]?.p ?? 0) || null;
   }
-  return priceRange(from, to, undefined, null);
+  return priceRange(from, to, undefined, null, unpriced);
 }
 
-async function priceRange(from: number, to: number, o: Only | undefined, fixedEthUsd: number | null): Promise<number> {
+async function priceRange(from: number, to: number, o: Only | undefined, fixedEthUsd: number | null, unpriced?: (Leg & { tx_hash: string })[]): Promise<number> {
   const only = onlySql(o);
   const swaps = await rows<Swap & { block: string; tx_index: number; log_index: number; tx_hash: string; time: string; pool: string; tx_from: string; verified: number }>(
     `SELECT s.block, s.tx_index, s.log_index, s.tx_hash, s.time, s.venue, s.pool, toString(s.amount0) AS a0, toString(s.amount1) AS a1,
@@ -105,7 +120,7 @@ async function priceRange(from: number, to: number, o: Only | undefined, fixedEt
   const out = [];
   for (const s of swaps) {
     const p = priceSwap(s, decimals.get(sides(s.token0, s.token1, bridges)?.token ?? ""), ethUsd, bridges);
-    if (!p) continue;
+    if (!p) { for (const l of unpricedLegs(s)) unpriced?.push({ ...l, tx_hash: s.tx_hash }); continue; }
     out.push({
       block: s.block, tx_index: s.tx_index, log_index: s.log_index, tx_hash: s.tx_hash, time: s.time, pool: s.pool, venue: s.venue,
       token: p.token, quote: p.quote, token_delta: p.tokenDelta.toString(), quote_delta: p.quoteDelta.toString(),
@@ -117,35 +132,42 @@ async function priceRange(from: number, to: number, o: Only | undefined, fixedEt
   return out.length;
 }
 
+/** The last USD price (≥ $100 swap, verified quote pool) and the volume since start of every token the projector has
+ *  priced, so a bridge's day lookback reads ev_prices once per token per process, not every tick. usd 0: none in that day.
+ *  ponytail: never pruned (one entry per token ever priced, ~100K a month); prune by block if the process grows. */
+const lastUsd = new Map<string, { usd: number; block: number; vol: number }>();
+
 /** The bridges for a range's token/token pools: either side priced against a quote asset in the range (verified pools,
- *  swaps ≥ $100), else in the BRIDGE_BLOCKS before it (ev_prices); kept when that volume reaches BRIDGE_MIN_USD. */
-async function bridgesOf(from: number, swaps: (Swap & { verified: number })[], decimals: Map<string, number>): Promise<Map<string, Bridge>> {
-  const need = [...new Set(swaps.filter((s) => !(s.token0 in QUOTE_DECIMALS) && !(s.token1 in QUOTE_DECIMALS)).flatMap((s) => [s.token0, s.token1]))]
-    .filter((t) => (decimals.get(t) ?? -1) >= 0), needs = new Set(need);
-  if (!need.length) return new Map();
-  const here = new Map<string, number[]>(), vol = new Map<string, number>();
+ *  swaps ≥ $100, median), else its last such price in the BRIDGE_BLOCKS before it. */
+async function bridgesOf(from: number, swaps: (Swap & { block: string; verified: number })[], decimals: Map<string, number>): Promise<Map<string, Bridge>> {
+  const here = new Map<string, number[]>();
   for (const s of swaps) {
     if (!s.verified) continue;
     const p = priceSwap(s, decimals.get(sides(s.token0, s.token1)?.token ?? ""), ethUsd);
-    if (!p || p.usd < 100 || !needs.has(p.token)) continue;
+    if (!p || p.usd < 100) continue;
     (here.get(p.token) ?? here.set(p.token, []).get(p.token)!).push(p.priceUsd);
-    vol.set(p.token, (vol.get(p.token) ?? 0) + p.usd);
+    const l = lastUsd.get(p.token);
+    lastUsd.set(p.token, { usd: p.priceUsd, block: Number(s.block), vol: (l?.vol ?? 0) + p.usd });
   }
-  const before = new Map<string, number>();
-  for (let i = 0; i < need.length; i += 300) { // query parameters travel in the URL
-    for (const r of await rows<{ token: string; pu: number; vu: number }>(
-      `SELECT token, argMax(price_usd, (block, log_index)) AS pu, sum(usd) AS vu FROM ev_prices
+  const need = [...new Set(swaps.filter((s) => !(s.token0 in QUOTE_DECIMALS) && !(s.token1 in QUOTE_DECIMALS)).flatMap((s) => [s.token0, s.token1]))]
+    .filter((t) => (decimals.get(t) ?? -1) >= 0);
+  const cold = need.filter((t) => !here.has(t) && !lastUsd.has(t));
+  for (let i = 0; i < cold.length; i += 300) { // query parameters travel in the URL
+    const got = new Map((await rows<{ token: string; pu: number; vu: number; b: string }>(
+      `SELECT token, argMax(price_usd, (block, log_index)) AS pu, sum(usd) AS vu, max(block) AS b FROM ev_prices
        WHERE token IN {t:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String}) AND verified = 1 AND usd >= 100 AND sign = 1
          AND block > {lo:UInt64} AND block <= {from:UInt64} GROUP BY token`,
-      { t: need.slice(i, i + 300), w: WETH, n: NATIVE_ETH, u: USDG, lo: Math.max(0, from - BRIDGE_BLOCKS), from })) {
-      before.set(r.token, Number(r.pu));
-      vol.set(r.token, (vol.get(r.token) ?? 0) + Number(r.vu));
+      { t: cold.slice(i, i + 300), w: WETH, n: NATIVE_ETH, u: USDG, lo: Math.max(0, from - BRIDGE_BLOCKS), from })).map((r) => [r.token, r]));
+    for (const t of cold.slice(i, i + 300)) {
+      const r = got.get(t);
+      lastUsd.set(t, r ? { usd: Number(r.pu), block: Number(r.b), vol: Number(r.vu) } : { usd: 0, block: from, vol: 0 });
     }
   }
   const out = new Map<string, Bridge>();
   for (const t of need) {
-    const ps = here.get(t)?.sort((a, b) => a - b), usd = ps ? ps[Math.floor(ps.length / 2)] : before.get(t);
-    if (usd && (vol.get(t) ?? 0) >= BRIDGE_MIN_USD) out.set(t, { dec: decimals.get(t)!, usd, vol: vol.get(t)! });
+    const ps = here.get(t)?.sort((a, b) => a - b), l = lastUsd.get(t);
+    const usd = ps ? ps[Math.floor(ps.length / 2)] : l && l.block > from - BRIDGE_BLOCKS ? l.usd : 0;
+    if (usd) out.set(t, { dec: decimals.get(t)!, usd, vol: l?.vol ?? 0 });
   }
   return out;
 }

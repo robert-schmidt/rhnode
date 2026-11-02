@@ -6,21 +6,23 @@
 // - an ERC-4337 bundle (EntryPoint): each userOp's sender. The EntryPoint emits an op's own logs and then its
 //   UserOperationEvent, so an op owns the logs after the previous UserOperationEvent up to its own;
 // - a Relay fill: the recipient (they paid on another chain; ev_relay says how much in USDG/WETH).
-// A trade needs both: a priced swap of the token in the actor's segment AND a net change in the actor's own
-// balance of it. A router or solver moving tokens for someone else changes nothing of its own and isn't a trade.
+// A trade needs both: a swap of the token in the actor's segment AND a net change in the actor's own balance of it.
+// A router or solver moving tokens for someone else changes nothing of its own and isn't a trade. A swap the projector
+// couldn't price (a token/token pool without a bridge, unknown decimals) still makes the trade: priced = 0, its usd and
+// eth unknown (written as 0; GET /v1/trades says null). agg_wallet_token sums priced trades only (migration 034).
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { NATIVE_ETH, USDG, WETH } from "../chain/constants.ts";
-import { onlySql, type Only } from "./prices.ts";
+import { onlySql, type Leg, type Only } from "./prices.ts";
 
 export const USER_OP_EVENT = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
 
 type Transfer = { log_index: number; token: string; from: string; to: string; amount: string };
-type Price = { log_index: number; token: string; quote: string; token_delta: string; usd: number; quote_amount: number };
 type UserOp = { log_index: number; sender: string };
-export type Trade = { wallet: string; token: string; amount: bigint; usd: number; eth: number; via: "swap" | "userop" };
+/** usd and eth null: no swap behind it that went the wallet's way had a price. */
+export type Trade = { wallet: string; token: string; amount: bigint; usd: number | null; eth: number | null; via: "swap" | "userop" };
 
 /** PURE. One tx → its trades. */
-export function tradesOfTx(signer: string, transfers: Transfer[], prices: Price[], userOps: UserOp[]): Trade[] {
+export function tradesOfTx(signer: string, transfers: Transfer[], prices: Leg[], userOps: UserOp[]): Trade[] {
   const segments = userOps.length
     ? userOps.map((op, i) => ({ actor: op.sender, via: "userop" as const, lo: i ? userOps[i - 1].log_index : -1, hi: op.log_index }))
     : [{ actor: signer, via: "swap" as const, lo: -1, hi: Infinity }];
@@ -36,36 +38,42 @@ export function tradesOfTx(signer: string, transfers: Transfer[], prices: Price[
         if (t.from === seg.actor) delta -= BigInt(t.amount);
       }
       if (delta === 0n) continue;
-      // Value: the swaps of this token in this segment that went the same way as the wallet's balance.
-      const same = swaps.filter((p) => p.token === token && (BigInt(p.token_delta) > 0n) === delta > 0n);
+      // Value: the priced swaps of this token in this segment that went the same way as the wallet's balance.
+      const of = swaps.filter((p) => p.token === token), same = of.filter((p) => (BigInt(p.token_delta) > 0n) === delta > 0n);
+      const valued = same.filter((p) => p.usd !== null);
+      const priced = valued.length > 0 || (!same.length && of.some((p) => p.usd !== null));
       out.push({
         wallet: seg.actor, token, amount: delta, via: seg.via,
-        usd: same.reduce((a, p) => a + p.usd, 0),
-        eth: same.filter((p) => p.quote === WETH || p.quote === NATIVE_ETH).reduce((a, p) => a + p.quote_amount, 0),
+        usd: priced ? valued.reduce((a, p) => a + p.usd!, 0) : null,
+        eth: priced ? valued.filter((p) => p.quote === WETH || p.quote === NATIVE_ETH).reduce((a, p) => a + p.quote_amount, 0) : null,
       });
     }
   }
   return out;
 }
 
-/** Trades for every tx in (from, to] with a priced swap, plus Relay fills. only (src/tools/venue-backfill.ts): just txs
- *  with a price of that subset and no trade yet, no Relay fills. */
-export async function deriveTrades(from: number, to: number, o?: Only): Promise<number> {
-  const r = { from, to, ...await span(from, to), ...(o ? { only_pools: o.pools ?? [] } : {}) };
+/** Trades for every tx in (from, to] with a swap, priced (ev_prices) or not (unpriced: derivePrices' legs), plus Relay
+ *  fills. only (src/tools/venue-backfill.ts): just txs with a price of that subset and no trade yet, no Relay fills. */
+export async function deriveTrades(from: number, to: number, o?: Only, unpriced: (Leg & { tx_hash: string })[] = []): Promise<number> {
+  // ponytail: the unpriced txs travel as a query parameter (~90 in a 5,000-block range; a 128 KB field holds ~1,700)
+  const u = [...new Set(unpriced.map((l) => l.tx_hash))];
+  const r = { from, to, u, ...await span(from, to), ...(o ? { only_pools: o.pools ?? [] } : {}) };
   const only = o ? `${onlySql(o)}) AND hash NOT IN (SELECT tx_hash FROM ev_trades WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}` : "";
   const txs = await rows<{ block: string; tx_index: number; tx_hash: string; time: string; signer: string; keep: number }>(
     `SELECT block, tx_index, hash AS tx_hash, time, \`from\` AS signer, keep FROM raw_txs
-     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only})`, r);
+     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}
+       AND (hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only}) OR hash IN {u:Array(String)})`, r);
   const byTx = <T extends { tx_hash: string }>(xs: T[]) => {
     const m = new Map<string, T[]>();
     for (const x of xs) (m.get(x.tx_hash) ?? m.set(x.tx_hash, []).get(x.tx_hash)!).push(x);
     return m;
   };
-  const inRange = `block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND tx_hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()})`;
+  const inRange = `block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}
+    AND (tx_hash IN (SELECT tx_hash FROM ev_prices WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()}) OR tx_hash IN {u:Array(String)})`;
   const transfers = byTx(await rows<Transfer & { tx_hash: string }>(
     `SELECT tx_hash, log_index, token, \`from\`, \`to\`, toString(amount) AS amount FROM ev_transfers WHERE standard = 'erc20' AND sign = 1 AND ${inRange}`, r));
-  const prices = byTx(await rows<Price & { tx_hash: string }>(
-    `SELECT tx_hash, log_index, token, quote, toString(token_delta) AS token_delta, usd, quote_amount FROM ev_prices WHERE sign = 1 AND ${inRange}`, r));
+  const prices = byTx([...await rows<Leg & { tx_hash: string }>(
+    `SELECT tx_hash, log_index, token, quote, toString(token_delta) AS token_delta, usd, quote_amount FROM ev_prices WHERE sign = 1 AND ${inRange}`, r), ...unpriced]);
   const ops = byTx(await rows<UserOp & { tx_hash: string }>(
     `SELECT tx_hash, log_index, concat('0x', substring(topic2, 27)) AS sender FROM raw_logs WHERE topic0 = {uoe:String} AND ${inRange} ORDER BY log_index`,
     { ...r, uoe: USER_OP_EVENT }));
@@ -74,7 +82,8 @@ export async function deriveTrades(from: number, to: number, o?: Only): Promise<
   for (const tx of txs) {
     for (const t of tradesOfTx(tx.signer, transfers.get(tx.tx_hash) ?? [], prices.get(tx.tx_hash) ?? [], ops.get(tx.tx_hash) ?? [])) {
       out.push({ block: tx.block, tx_index: tx.tx_index, tx_hash: tx.tx_hash, time: tx.time, wallet: t.wallet, token: t.token,
-        side: t.amount > 0n ? "buy" : "sell", amount: t.amount.toString(), usd: t.usd, eth: t.eth, via: t.via, keep: tx.keep, sign: 1 });
+        side: t.amount > 0n ? "buy" : "sell", amount: t.amount.toString(), usd: t.usd ?? 0, eth: t.eth ?? 0, priced: t.usd === null ? 0 : 1,
+        via: t.via, keep: tx.keep, sign: 1 });
     }
   }
   if (o) { await insert("ev_trades", out, `${o.tag}-trades:${from}-${to}`); return out.length; }
@@ -89,7 +98,7 @@ export async function deriveTrades(from: number, to: number, o?: Only): Promise<
     if (out.some((o) => (o as { tx_hash: string }).tx_hash === f.tx_hash && (o as { wallet: string }).wallet === f.recipient && (o as { token: string }).token === f.token)) continue;
     const eth = Number(f.weth_in) / 1e18;
     out.push({ block: f.block, tx_index: f.tx_index, tx_hash: f.tx_hash, time: f.time, wallet: f.recipient, token: f.token, side: "buy",
-      amount: f.amount, usd: Number(f.usdg_in) / 1e6 + eth * ethUsd, eth, via: "relay", keep: f.keep, sign: 1 });
+      amount: f.amount, usd: Number(f.usdg_in) / 1e6 + eth * ethUsd, eth, priced: 1, via: "relay", keep: f.keep, sign: 1 });
   }
   await insert("ev_trades", out, `trades:${from}-${to}`);
   return out.length;

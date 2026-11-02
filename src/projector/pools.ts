@@ -47,7 +47,7 @@ const failed = (pool: string, venue: string, manager: string): Row => ({
 });
 
 /** v2/v3: read the pool, then ask its factory whether it is the pool for that pair (and fee). */
-async function resolveV23(up: Client, pools: { pool: string; venue: string }[]): Promise<Row[]> {
+export async function resolveV23(up: Client, pools: { pool: string; venue: string }[]): Promise<Row[]> {
   const out: Row[] = [];
   for (let i = 0; i < pools.length; i += 100) {
     const part = pools.slice(i, i + 100);
