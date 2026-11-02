@@ -48,20 +48,34 @@ export async function readTokens(up: Client, block: number, asks: { token: strin
 
 type Stats = { token: string; holder_count: string; top10: string; minted: string };
 
+// Tokens with ≥ BIG holders (WETH, USDG, ...) group millions of balances per projection: 1.4-1.8 GiB a query, ~50 every
+// 5 min, the most of ClickHouse's memory (2026-11-02; it peaked at 5.45 of its 5.59 GiB cap). A tick moves their stats
+// by a hair, so they're re-projected at most every BIG_EVERY_MS.
+const BIG = 100_000, BIG_EVERY_MS = 300_000;
+const bigAt = new Map<string, number>(); // big token → when it was last projected
+
+/** PURE. The dirty tokens due now: all but the big ones projected less than BIG_EVERY_MS ago. */
+export const dueTokens = (dirty: string[], big: Map<string, number>, now: number) =>
+  dirty.filter((t) => { const at = big.get(t); return at === undefined || now - at >= BIG_EVERY_MS; });
+
 export async function project(up: Client, from: number, to: number): Promise<number> {
-  const dirty = (await rows<{ token: string }>(
+  const dirty = dueTokens((await rows<{ token: string }>(
     `SELECT DISTINCT token FROM ev_transfers WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND standard = 'erc20'`,
     { from, to, ...await span(from, to) },
-  )).map((r) => r.token);
-  await projectTokens(up, dirty, to, `${from}-${to}`);
+  )).map((r) => r.token), bigAt, Date.now());
+  const counts = await projectTokens(up, dirty, to, `${from}-${to}`);
+  for (const [t, n] of counts) if (n >= BIG) bigAt.set(t, Date.now());
   return dirty.length;
 }
 
-/** Rewrite serve_tokens for these tokens as of block `to` (also used by the promoter after a backfill). */
-export async function projectTokens(up: Client, dirty: string[], to: number, tag: string): Promise<void> {
+/** Rewrite serve_tokens for these tokens as of block `to` (also used by the promoter after a backfill); returns their
+ *  holder counts. */
+export async function projectTokens(up: Client, dirty: string[], to: number, tag: string): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
   for (let i = 0; i < dirty.length; i += CHUNK) {
     const chunk = dirty.slice(i, i + CHUNK);
-    // ponytail: groups every holder of WETH/USDG each tick; a per-token holder count kept by an MV if this gets slow.
+    // ponytail: a big token (BIG) groups every holder; project() spaces those out. A per-token holder count kept by an MV
+    // if that stops being enough.
     // top10 sums in UInt256: a spam token's ten balances can pass 2^255, which wrapped negative in Int256 and stalled
     // the history pass at block 94.84M (2026-10-31).
     const stats = await rows<Stats>(
@@ -74,6 +88,7 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
     );
     // A token whose every balance went back to 0 has no agg_balances rows left (SummingMergeTree drops zero sums), so it
     // isn't in `stats`: it still gets its row, or its card would keep the last non-zero state (wRDDT, 2026-10-30).
+    for (const s of stats) counts.set(s.token, Number(s.holder_count));
     const have = new Set(stats.map((s) => s.token));
     for (const token of chunk) if (!have.has(token)) stats.push({ token, holder_count: "0", top10: "0", minted: "0" });
     const known = new Map((await rows<{ token: string; name: string; symbol: string; decimals: number }>(
@@ -97,6 +112,7 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
       };
     }), `${tag}:${i}`);
   }
+  return counts;
 }
 
 /** Hourly: a complete token whose totalSupply() moved without a Transfer we saw (rebasing, a non-standard mint) is

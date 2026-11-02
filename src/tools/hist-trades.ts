@@ -22,9 +22,9 @@ import { priceSwap, QUOTE_DECIMALS, sides, unpricedLegs, type Bridge, type Leg }
 import { tradesOfTx, USER_OP_EVENT } from "../projector/trades.ts";
 
 const FLUSH = 50_000, DRY = process.env.DRY === "1";
-// Server cap 6 GB with ~3.5-4 GB in use, and two of these open at once: each stays under 1 GB, spills its sort to disk
-// past 300 MB, and is cancelled when the tool goes away (a stopped run must not leave its reads going).
-const SORTED = { workload: "bulk", max_threads: 2, max_memory_usage: "1000000000", max_bytes_before_external_sort: "300000000",
+// Server cap 6 GB, normal peaks ~5 GB (2026-11-02), and two of these open at once: each stays under 600 MB, spills its
+// sort to disk past 150 MB, and is cancelled when the tool goes away (a stopped run must not leave its reads going).
+const SORTED = { workload: "bulk", max_threads: 2, max_memory_usage: "600000000", max_bytes_before_external_sort: "150000000",
   cancel_http_readonly_queries_on_client_close: 1 };
 type Swap = { block: string; tx_index: number; log_index: number; tx_hash: string; ts: number; venue: "v2" | "v3" | "v4"; pool: string; a0: string; a1: string; sqrt: string; tx_from: string };
 type Transfer = { block: string; tx_index: number; log_index: number; batch_index: number; token: string; from: string; to: string; amount: string };
