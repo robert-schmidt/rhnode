@@ -57,7 +57,7 @@ export async function loadBridges(tokens: string[], from: number, to: number, de
     const cs = await rows<{ token: string; pool: string; m: number; c: number; v: number }>(
       `SELECT token, pool, toUnixTimestamp(minute) AS m, argMaxMerge(close_usd) AS c, sum(volume_usd) AS v FROM agg_candles_1m
        WHERE token IN {t:Array(String)} AND quote IN ({w:String}, {n:String}, {u:String}) AND minute >= toDateTime({from:UInt32}) - INTERVAL 1 DAY AND minute < toDateTime({to:UInt32})
-       GROUP BY token, pool, m HAVING v >= 100`, { from, to, t: tokens.slice(i, i + 1_000), w: WETH, n: NATIVE_ETH, u: USDG });
+       GROUP BY token, pool, m HAVING v >= 100 AND c < 1e12`, { from, to, t: tokens.slice(i, i + 1_000), w: WETH, n: NATIVE_ETH, u: USDG });
     const ver = new Set<string>(), cp = [...new Set(cs.map((c) => c.pool))];
     for (let j = 0; j < cp.length; j += 1_000)
       for (const r of await rows<{ pool: string }>("SELECT pool FROM pools FINAL WHERE verified = 1 AND pool IN {p:Array(String)}", { p: cp.slice(j, j + 1_000) })) ver.add(r.pool);
@@ -73,7 +73,9 @@ export async function loadBridges(tokens: string[], from: number, to: number, de
   }
   for (const b of bUsd.values()) {
     // a minute closed by a swap that drained a v3/v4 range holds its tick limit (candles from before priceSwap's guard,
-    // 2026-11-02: up to 1.6e51 USD a trade): a minute 1000× off the token's median is left out
+    // 2026-11-02: up to 1.6e51 USD a trade): a minute 1000× off the token's median is left out. The median alone misses
+    // a token whose only verified pool in a minute is such a pool (OYSTER at 8e41, 2026-10-27 22:02), so no close of
+    // $1e12 or more counts at all (ponytail: a fixed ceiling; nothing real is priced near it)
     const vs = [...b.at.values()].sort((x, y) => x - y), med = vs[Math.floor(vs.length / 2)];
     for (const [m, c] of b.at) if (c / med > 1000 || med / c > 1000) b.at.delete(m);
     b.keys = [...b.at.keys()].sort((x, y) => x - y);
