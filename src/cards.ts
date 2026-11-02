@@ -62,7 +62,8 @@ export const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' A
   LEFT JOIN (SELECT token, block, detail FROM kept_launches FINAL PREWHERE token IN {t:Array(String)} AND kind = 'migration' WHERE sign = 1
         ORDER BY block LIMIT 1 BY token) AS m ON m.token = l.token
   LEFT JOIN (SELECT DISTINCT tk, pool, created_block FROM pools ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
-        AND tk IN {t:Array(String)}) AS g ON g.tk = l.token AND g.created_block = m.block`;
+        AND tk IN {t:Array(String)} AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})) AS g -- the last: for migration 035's indexes
+        ON g.tk = l.token AND g.created_block = m.block`;
 const BAND = 92_103, MAX_TICK = 887_272; // ln(10,000) / ln(1.0001) ticks each side
 const LAUNCHPADS = [...PROTOCOL.values()].filter((e) => e.kind === "launchpad").map((e) => e.address);
 const LOCKERS = [...PROTOCOL.values()].filter((e) => e.kind === "locker").map((e) => e.address);
