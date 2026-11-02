@@ -25,6 +25,7 @@ const STEP = 2_000; // blocks a chunk (the cursor moves per chunk)
 const BATCH = 10; // blocks a JSON-RPC batch (and as many receipts)
 const PAR_MAX = Number(process.env.HISTORY_PAR_MAX ?? 32);
 const MAX_LAG = 50; // blocks ingest may trail our node before the pass waits
+const PROJ_MAX_LAG = 300; // and the projector
 const INSERT_ROWS = 100_000;
 const PROJECT_EVERY = 1_000_000; // blocks between re-projections of the tokens it touched
 const HIST = { raw_txs: "hist_txs", raw_logs: "hist_logs", ev_transfers: "hist_transfers", ev_swaps: "hist_swaps", ev_launches: "hist_launches", ev_pools: "hist_pools", ev_relay: "hist_relay" } as const;
@@ -40,17 +41,21 @@ export async function walkFloor(): Promise<number | null> {
 }
 
 /** Blocks ingest trails our node by (null: the node isn't synced or known). */
-/** null: wait (our node isn't synced, or the pass is paused). */
+/** null: wait (our node isn't synced, the pass is paused, or the projector trails by more than PROJ_MAX_LAG). */
 async function ingestLag(): Promise<number | null> {
   if (!nitroSynced() || nitro.head == null) return null;
   // With tip traces the tracer counts as ingest: it lost three 1,000-block windows on 2026-10-31 while the pass ran at
   // 32 in flight and ingest itself kept up, so the pass backs off when either trails.
   // Paused while ctl_cursors 'history_pause' has block 1 (2026-11-01, to leave the node to a client's heavy hour):
   // `INSERT INTO ctl_cursors (name, block, hash, version) VALUES ('history_pause', 1, '', toUnixTimestamp64Milli(now64()))`, 0 resumes.
-  const [t] = await rows<{ b: string; p: string }>(
-    "SELECT minIf(block, name IN {n:Array(String)}) AS b, maxIf(block, name = 'history_pause') AS p FROM ctl_cursors FINAL WHERE name IN {n:Array(String)} OR name = 'history_pause'",
+  const [t] = await rows<{ b: string; p: string; j: string }>(
+    `SELECT minIf(block, name IN {n:Array(String)}) AS b, maxIf(block, name = 'history_pause') AS p, maxIf(block, name = 'projector') AS j
+     FROM ctl_cursors FINAL WHERE name IN {n:Array(String)} OR name IN ('history_pause', 'projector')`,
     { n: cfg.traces === "tip" ? ["tip", "trace"] : ["tip"] });
   if (Number(t?.p)) return null;
+  // The projector (prices, trades, cards: what clients read) comes first too. It runs 30–200 blocks behind; at 440 on
+  // 2026-11-02, with the pass and a backfill sharing 18 W, its ticks took 22 s while ingest kept up.
+  if (Number(t?.j) && nitro.head - Number(t.j) > PROJ_MAX_LAG) return null;
   return nitro.head - Number(t?.b ?? 0);
 }
 
