@@ -3,9 +3,7 @@
 // - main pool: a launchpad token's own market (official: true), never another pool: Pons v2's curve until it graduates, then
 //   the meme-hook v4 pool created in the graduation's block (decoys use that hook too); Flap's and hood.fun's migration pool
 //   (none before, as their curves aren't decoded); Bags' poolId from TokenCreated. Any other token: against a quote asset,
-//   verified first, then most net USD volume in 24 h, then most ever (1-minute candles); a pick with under $1,000 on its
-//   quote side gives way to the runner-up when that is as verified and deeper (PAT 2026-11-02: an ETH pool holding $22.57
-//   priced it at $15M FDV while its NVDA pool was the market);
+//   verified first, then most net USD volume in 24 h, then most ever (1-minute candles);
 // - net volume: a tx's swaps in one pool count as what is left after buys and sells cancel (a same-tx round trip, wash,
 //   counts ~0); the *_raw_usd fields keep the gross, so wash shows as the gap;
 // - a main pool against a non-quote token is priced through it (quote_via: its last hour's USD price, the projector's
@@ -85,7 +83,7 @@ async function eth(): Promise<number | null> {
 const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) / 10_000 : null);
 const sum = (xs: bigint[]) => xs.reduce((a, b) => a + b, 0n);
 
-type Pool = { token: string; pool: string; venue: string; v24: number; raw24: number; v: number; n: number; verified: number; official: number; token0: string; token1: string; created_block: string; spacing: number };
+type Pool = { token: string; pool: string; venue: string; v24: number; raw24: number; v: number; verified: number; official: number; token0: string; token1: string; created_block: string; spacing: number };
 type Mid = { price: number | null; liquidityUsd: number | null; quoteUsd: number | null; kind: "reserves" | "active" | "curve" | "balances"; balancesUsd: number | null };
 
 /** PURE. Price (quote per token, human units) and liquidity from a pool's state at the tip. */
@@ -146,25 +144,7 @@ const ticks = new Map<string, { at: number; tick: number; lo: number; hi: number
 const mc = (up: Up, cs: Call[]) => Promise.all(Array.from({ length: Math.ceil(cs.length / 500) }, (_, i) => cs.slice(i * 500, i * 500 + 500))
   .map((c) => multicall(up, c).catch(() => c.map(() => null)))).then((r) => r.flat());
 
-const THIN_USD = 1_000;
-type Main = { verified: boolean; liquidity_quote_usd: number | null } | null;
-/** PURE. The runner-up's card replaces a thin pick's when its pool is as verified and deeper on the quote side. */
-export function deeper(first: Card, alt: Card | undefined): Card {
-  const a = first.main_pool as Main, b = alt?.main_pool as Main;
-  return a && b && b.verified >= a.verified && (b.liquidity_quote_usd ?? 0) > (a.liquidity_quote_usd ?? 0) ? alt! : first;
-}
-
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
-  const [out, multi] = await build1(up, tokens, []);
-  const thin = [...out].filter(([tk, c]) => multi.has(tk) && ((c.main_pool as Main)?.liquidity_quote_usd ?? Infinity) < THIN_USD);
-  if (!thin.length) return out;
-  const [alt] = await build1(up, thin.map(([tk]) => tk), thin.map(([, c]) => (c.main_pool as Card).pool as string));
-  for (const [tk, c] of thin) out.set(tk, deeper(c, alt.get(tk)));
-  return out;
-}
-
-/** Cards, and the tokens with more than one candidate pool; `skip`: pools not to pick */
-async function build1(up: Up, tokens: string[], skip: string[]): Promise<[Map<string, Card>, Set<string>]> {
   const t = tokens;
   const [meta, launches, cands, trades, vols, eu, [tip], tops] = await Promise.all([
     rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
@@ -175,16 +155,15 @@ async function build1(up: Up, tokens: string[], skip: string[]): Promise<[Map<st
     rows<Pool>(
       // an official pool with no trade yet is a candidate too (volume 0)
       `SELECT c.token AS token, c.pool AS pool, toString(p.venue) AS venue, n.nv AS v24, n.rv AS raw24, c.vol AS v, p.verified AS verified,
-         p.token0 AS token0, p.token1 AS token1, toString(p.created_block) AS created_block, p.tick_spacing AS spacing, o.token != '' AS official,
-         count() OVER (PARTITION BY c.token) AS n
+         p.token0 AS token0, p.token1 AS token1, toString(p.created_block) AS created_block, p.tick_spacing AS spacing, o.token != '' AS official
        FROM (SELECT token, pool, sum(vu) AS vol FROM (SELECT token, pool, sum(volume_usd) AS vu FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool
              UNION ALL SELECT token, op AS pool, 0 AS vu FROM (${OFFICIAL}) WHERE op != '') GROUP BY token, pool) AS c
        LEFT JOIN (${NET24}) AS n ON n.token = c.token AND n.pool = c.pool
        INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL
          PREWHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)} WHERE ok = 1) AS p ON p.pool = c.pool
        LEFT JOIN (${OFFICIAL}) AS o ON o.token = c.token
-       WHERE (o.token = '' OR c.pool = o.op) AND c.pool NOT IN {x:Array(String)}
-       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token ${BY_TOKEN}`, { t, x: skip }),
+       WHERE o.token = '' OR c.pool = o.op
+       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token ${BY_TOKEN}`, { t }),
     rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
          uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
@@ -344,7 +323,7 @@ async function build1(up: Up, tokens: string[], skip: string[]): Promise<[Map<st
       block: ingested, price_block: projected,
     });
   }
-  return [out, new Set([...P.values()].filter((p) => Number(p.n) > 1).map((p) => p.token))];
+  return out;
 }
 
 // A card for 60 s; concurrent callers of one token share one computation. ponytail: cleared wholesale at 10K keys.
