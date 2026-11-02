@@ -93,6 +93,8 @@ here: ClickHouse `:8123`, Redis `:6379` and Nitro `:8547`/`:8548` are then publi
 `ops/harden.sh` locks the box down around that: SSH keys only for one user, root locked, ufw letting in only SSH from
 the LAN, fail2ban, and the firewall unit installed.
 
+Looking for the API repo? [Get in touch](https://github.com/robert-schmidt/rhnode/issues) and I'll share it with you if you're worthy.
+
 Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_blocks` from go-live), and the history floor
 (`ctl_cursors` `walk`, the history pass's floor, or go-live before it starts) say what can be answered exactly; anything older is "unknown".
 
