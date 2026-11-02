@@ -64,6 +64,9 @@ export const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' A
   LEFT JOIN (SELECT DISTINCT tk, pool, created_block FROM pools ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
         AND tk IN {t:Array(String)} AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})) AS g -- the last: for migration 035's indexes
         ON g.tk = l.token AND g.created_block = m.block`;
+// pools FINAL by token0/token1 (migration 035's indexes): exact mode re-reads every key range the unmerged parts share
+// (1.39M of 1.65M rows); every version of a pool has the same tokens, so the index alone finds them all (103K rows).
+const BY_TOKEN = "SETTINGS use_skip_indexes_if_final_exact_mode = 0";
 const BAND = 92_103, MAX_TICK = 887_272; // ln(10,000) / ln(1.0001) ticks each side
 const LAUNCHPADS = [...PROTOCOL.values()].filter((e) => e.kind === "launchpad").map((e) => e.address);
 const LOCKERS = [...PROTOCOL.values()].filter((e) => e.kind === "locker").map((e) => e.address);
@@ -160,7 +163,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
          PREWHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)} WHERE ok = 1) AS p ON p.pool = c.pool
        LEFT JOIN (${OFFICIAL}) AS o ON o.token = c.token
        WHERE o.token = '' OR c.pool = o.op
-       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token`, { t }),
+       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token ${BY_TOKEN}`, { t }),
     rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
          uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
@@ -194,7 +197,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
          WHERE token IN {t:Array(String)} GROUP BY token, holder HAVING b > 0) WHERE holder NOT IN {x:Array(String)} AND holder != token
            AND holder NOT IN (SELECT toFixedString(a, 42) FROM pools FINAL ARRAY JOIN [pool, hooks] AS a
              WHERE (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}) AND length(a) = 42)
-         ORDER BY b DESC LIMIT 10 BY token) GROUP BY token`, { t: full, x: exclude }),
+         ORDER BY b DESC LIMIT 10 BY token) GROUP BY token ${BY_TOKEN}`, { t: full, x: exclude }),
   ]) : [[], []];
 
   // A main pool against a non-quote token (a launch paired with a tokenised stock) is priced through it: its last USD
