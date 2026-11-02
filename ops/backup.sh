@@ -19,7 +19,9 @@ KEEP=$(conf BACKUP_KEEP); KEEP=${KEEP:-7}
 TABLES=$(conf BACKUP_TABLES); TABLES=${TABLES:-creations,curve_payouts,kept_native,token_origin,token_markets,labels,contracts,pools,serve_tokens,agg_candles_1m,agg_wallet_token,kept_trades,kept_launches,kept_pools}
 SSH=$(conf BACKUP_SSH); PORT=$(conf BACKUP_SSH_PORT); PORT=${PORT:-22}
 KEY=$(conf BACKUP_SSH_KEY); KEY=${KEY:-/root/.ssh/rhnode-backup}
-q() { docker compose exec -T clickhouse sh -c 'clickhouse-client -u "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -d rhnode "$@"' sh "$@"; }
+# bulk workload (migration 031), 2 threads: on 2026-11-02 the dump ran in default and SELECT * FROM agg_candles_1m
+# (15.5M rows, 3.7 GiB raw) took the server to 7.2 GiB RSS over its 5.6 GiB cap at 03:32: ingest inserts failed (3 restarts).
+q() { docker compose exec -T clickhouse sh -c 'clickhouse-client -u "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" -d rhnode --workload bulk --max_threads 2 "$@"' sh "$@"; }
 log() { echo "$(date -u +%T) $*"; }
 
 mkdir -p "$DIR"; rm -rf "$DIR"/*.tmp
