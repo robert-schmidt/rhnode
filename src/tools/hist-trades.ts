@@ -26,10 +26,9 @@ const FLUSH = 50_000, DRY = process.env.DRY === "1";
 // each spills its sort to disk past 100 MB in 16K-row blocks and may use 1.2 GB (600 MB failed while reading the
 // transfers' amounts), and is cancelled when the tool goes away (a stopped run must not leave its reads going).
 // ClickHouse 26.3's default max_bytes_ratio_before_external_sort (0.5) wins over the byte threshold: it never spilled
-// (0 parts, a day failed at 1.2 GB) until the ratio was 0 (2026-11-02, an hour's transfers: 9 parts). The two streams
-// are read in step, so one can sit unread while the other is walked: past 30 s (the default send timeout) the server dropped it.
+// (0 parts, a day failed at 1.2 GB) until the ratio was 0 (2026-11-02, an hour's transfers: 9 parts).
 const SORTED = { workload: "bulk", max_threads: 2, max_memory_usage: "1200000000", max_bytes_before_external_sort: "100000000",
-  max_bytes_ratio_before_external_sort: 0, max_block_size: 16384, http_send_timeout: 3600,
+  max_bytes_ratio_before_external_sort: 0, max_block_size: 16384,
   cancel_http_readonly_queries_on_client_close: 1 };
 type Swap = { block: string; tx_index: number; log_index: number; tx_hash: string; ts: number; venue: "v2" | "v3" | "v4"; pool: string; a0: string; a1: string; sqrt: string; tx_from: string };
 type Transfer = { block: string; tx_index: number; log_index: number; batch_index: number; token: string; from: string; to: string; amount: string };
@@ -90,9 +89,12 @@ async function main(from: number, to: number) {
   const p = { from, to, g: g.block };
   const win = `time >= toDateTime({from:UInt32}) AND time < toDateTime({to:UInt32})${DRY ? "" : " AND block < {g:UInt64}"}`;
   const long = createClient({ ...cfg.clickhouse, request_timeout: 3_600_000 });
-  async function* sorted<T>(query: string): AsyncGenerator<T> {
+  // resolves once the server answers, i.e. its sort is done. Both reads are started together and walked only when both
+  // have answered: a stream left unread over 30 s (the server's send timeout; a query setting doesn't move it) is
+  // dropped, as the transfers were while the swaps, started after them, still sorted (2026-11-02, a day: 49 s).
+  async function sorted<T>(query: string): Promise<AsyncGenerator<T>> {
     const rs = await long.query({ query, query_params: p, format: "JSONEachRow", clickhouse_settings: SORTED as never });
-    for await (const chunk of rs.stream()) for (const row of chunk) yield row.json<T>();
+    return (async function* () { for await (const chunk of rs.stream()) for (const row of chunk) yield row.json<T>(); })();
   }
   const both = (cols: string, a: string, b: string, where: string) => `SELECT ${cols} FROM ${a} WHERE ${where} UNION ALL SELECT ${cols} FROM ${b} WHERE ${where}`;
 
@@ -137,10 +139,10 @@ async function main(from: number, to: number) {
   console.error(`[hist-trades] ${from}..${to}: ${ps.length} pools (${pools.size} resolved, ${v23.length} v2/v3 looked up), ETH/USD in ${ethKeys.length} minutes, ${bPriced}/${bridged.length} bridge tokens priced, ${ops.size} userOp txs, ${relays.size} Relay fills`);
 
   // swaps and transfers, each sorted by tx: walk them together
-  const swaps = sorted<Swap>(`SELECT * FROM (${both("block, tx_index, log_index, tx_hash, toUnixTimestamp(time) AS ts, venue, pool, toString(amount0) AS a0, toString(amount1) AS a1, toString(sqrt_price_x96) AS sqrt, tx_from",
-    "kept_swaps", "ev_swaps", `sign = 1 AND ${win}`)}) ORDER BY block, tx_index, log_index`);
-  const transfers = sorted<Transfer>(`SELECT * FROM (${both("block, tx_index, log_index, batch_index, token, `from`, `to`, toString(amount) AS amount",
-    "kept_transfers", "ev_transfers", `standard = 'erc20' AND sign = 1 AND ${win}`)}) ORDER BY block, tx_index, log_index, batch_index`);
+  const [swaps, transfers] = await Promise.all([sorted<Swap>(`SELECT * FROM (${both("block, tx_index, log_index, tx_hash, toUnixTimestamp(time) AS ts, venue, pool, toString(amount0) AS a0, toString(amount1) AS a1, toString(sqrt_price_x96) AS sqrt, tx_from",
+    "kept_swaps", "ev_swaps", `sign = 1 AND ${win}`)}) ORDER BY block, tx_index, log_index`),
+    sorted<Transfer>(`SELECT * FROM (${both("block, tx_index, log_index, batch_index, token, `from`, `to`, toString(amount) AS amount",
+    "kept_transfers", "ev_transfers", `standard = 'erc20' AND sign = 1 AND ${win}`)}) ORDER BY block, tx_index, log_index, batch_index`)]);
   const cmp = (a: { block: string; tx_index: number }, b: { block: string; tx_index: number }) => Number(a.block) - Number(b.block) || a.tx_index - b.tx_index;
   let tNext = (await transfers.next()).value as Transfer | undefined, lastT = "";
   async function transfersOf(tx: { block: string; tx_index: number }) {
