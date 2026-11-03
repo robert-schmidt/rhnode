@@ -3,7 +3,7 @@
 // block or tx for a day, live pages for seconds) and concurrent misses for one page share one render. Each client IP
 // gets a token bucket for cache misses only, so a cached page costs nothing; nginx limits raw request rates in front.
 import type http from "node:http";
-import { CSS, CSS_PATH, html, JS, JS_PATH, LOGO, page, REPO, type Html } from "./html.ts";
+import { CSS, CSS_PATH, FAVICON, html, JS, JS_PATH, LOGO, page, REPO, type Html } from "./html.ts";
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
 import { address, block, hint, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
@@ -91,15 +91,19 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
     res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=31536000, immutable", ...SECURITY });
     res.end(JS); return true;
   }
-  if (LOGO && url.pathname === LOGO.path) {
-    res.writeHead(200, { "content-type": LOGO.type, "cache-control": "public, max-age=31536000, immutable", ...SECURITY });
-    res.end(LOGO.body); return true;
+  for (const a of [LOGO, FAVICON]) if (a && url.pathname === a.path) {
+    res.writeHead(200, { "content-type": a.type, "cache-control": "public, max-age=31536000, immutable", ...SECURITY });
+    res.end(a.body); return true;
   }
   if (url.pathname === "/robots.txt") {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end("User-agent: *\nDisallow: /search\nDisallow: /live\nDisallow: /address/*?\nCrawl-delay: 2\n"); return true;
   }
-  if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return true; }
+  if (url.pathname === "/favicon.ico") {
+    if (!FAVICON) { res.writeHead(204); res.end(); return true; }
+    res.writeHead(200, { "content-type": FAVICON.type, "cache-control": "public, max-age=86400", ...SECURITY });
+    res.end(FAVICON.body); return true;
+  }
   if (/^\/access(\/claim|\/token)?$/.test(url.pathname)) { await access(req, res, url); return true; }
   const r = route(url.pathname, url.searchParams);
   if (!r) return false;

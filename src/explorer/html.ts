@@ -14,12 +14,15 @@ export const JS_PATH = `/static/live.${createHash("sha256").update(JS).digest("h
 
 /** The deployment's logo (cfg.explorer.logo), beside the header title, at a content-hashed URL too. */
 const LOGO_TYPES: Record<string, string> = { png: "image/png", svg: "image/svg+xml", gif: "image/gif", webp: "image/webp" };
-export const LOGO = ((f) => {
+const asset = (f: string, name: string) => {
   const ext = f.split(".").pop()?.toLowerCase() ?? "";
   if (!f || !LOGO_TYPES[ext]) return null;
   const body = readFileSync(f);
-  return { body, type: LOGO_TYPES[ext], path: `/static/logo.${createHash("sha256").update(body).digest("hex").slice(0, 10)}.${ext}` };
-})(cfg.explorer.logo);
+  return { body, type: LOGO_TYPES[ext], path: `/static/${name}.${createHash("sha256").update(body).digest("hex").slice(0, 10)}.${ext}` };
+};
+export const LOGO = asset(cfg.explorer.logo, "logo");
+/** The deployment's favicon (cfg.explorer.favicon), linked from every page and also served at /favicon.ico. */
+export const FAVICON = asset(cfg.explorer.favicon, "favicon");
 
 export class Html { readonly s: string; constructor(s: string) { this.s = s; } toString() { return this.s; } }
 const ESC: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -45,7 +48,7 @@ export function page(title: string, body: Html, opts: { q?: string; refresh?: nu
   const refresh = opts.refresh ? html`<meta http-equiv="refresh" content="${opts.refresh}">` : "";
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${opts.live ? html`<noscript>${refresh}</noscript>` : refresh}
-<title>${title} · Robinhood Chain Explorer</title><link rel="stylesheet" href="${CSS_PATH}"><script src="${JS_PATH}" defer></script>
+<title>${title} · Robinhood Chain Explorer</title>${FAVICON ? html`<link rel="icon" type="${FAVICON.type}" href="${FAVICON.path}">` : ""}<link rel="stylesheet" href="${CSS_PATH}"><script src="${JS_PATH}" defer></script>
 <meta name="description" content="Robinhood Chain (4663) block explorer served from our own node and indexer."></head>
 <body><header><div class="bar"><a class="brand" href="/">${LOGO ? html`<img src="${LOGO.path}" alt="" width="28" height="28">` : ""}Robinhood <span>Chain</span> Explorer</a>
 <form action="/search" method="get" role="search"><input name="q" value="${opts.q ?? ""}" maxlength="100" placeholder="Block, tx hash, address or token" aria-label="Search" autocomplete="off" enterkeyhint="search"><button>Search</button></form></div></header>

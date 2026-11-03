@@ -74,6 +74,8 @@ export const cfg = {
     requireStar: env.EXPLORER_REQUIRE_STAR !== "0",
     /** Optional logo beside the header title: a PNG/SVG/GIF/WebP file path in the container; none when unset. */
     logo: env.EXPLORER_LOGO ?? "",
+    /** Optional favicon: a PNG/SVG/GIF/WebP file path in the container; /favicon.ico answers 204 when unset. */
+    favicon: env.EXPLORER_FAVICON ?? "",
     /** Optional footer credit, "text|https://url" (e.g. who the deployment is run for); none when unset. */
     credit: ((c) => (c.length === 2 && /^https:\/\/[^\s"<>]+$/.test(c[1]) ? { text: c[0], url: c[1] } : null))((env.EXPLORER_CREDIT ?? "").split("|")),
     /** Optional: a GitHub token (no scopes) lifts the keyless 60 requests/h. Never logged. */
