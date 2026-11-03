@@ -1,6 +1,6 @@
-// The home page's live feed: polls /live (server-rendered rows, cached 1 s for everyone) and feeds rows newer than the
+// The home page's live feed: polls /live every 5 s (server-rendered rows, cached 1 s for everyone) and feeds rows newer than the
 // ones it shows (data-o: block, or block and tx index) in at the top, spread over the poll interval so the list moves like the chain does. Pointing at a list (or focusing
-// into it) pauses it; a hidden tab doesn't poll. Without this script the page refreshes itself (<noscript>).
+// into it) pauses it; a hidden tab or an idle visitor doesn't poll, and coming back shows the current rows at once. Without this script the page refreshes itself (<noscript>).
 "use strict";
 // The search box: what the text is (a block, a tx, an address, a token's name) as it's typed or pasted, in a box under it.
 // Only an address asks the server (/hint/<address>, cached 60 s), whether it's a token, a contract or a wallet.
@@ -84,16 +84,20 @@
 })();
 
 (() => {
-  const POLL = 1500, KEEP = 15; // /live carries ~4 s of blocks, so a poll never skips one
+  // One /live poll every 5 s while the tab is visible and someone is there (no input for IDLE: polling stops until
+  // they move). Each poll's new rows drip in over the next 5 s, newest ending on top; whatever is still queued when the
+  // next poll lands goes in at once, so the list is never more than one poll behind. After a gap (hidden tab, sleep,
+  // idle, failed polls) the lists are replaced with the current rows instead of replaying what was missed.
+  const POLL = 5000, KEEP = 15, IDLE = 15 * 60_000;
   const lists = ["blocks", "txs"].map((id) => { const el = document.getElementById(id); return { el, badge: el && el.closest("section").querySelector(".live"), queue: [], held: false }; });
   const tiles = document.getElementById("tiles"), net = document.getElementById("net");
   if (!lists.every((l) => l.el) || !tiles) return;
   document.documentElement.classList.add("js");
-  let off = false;
-  // each list's badge: Paused while pointed at (that list only), Reconnecting while /live fails, else Live
+  let off = false, idle = false, busy = false, seen = Date.now(), lastOk = Date.now(), timer = 0;
+  // each list's badge: Paused while pointed at (that list only) or idle, Reconnecting while /live fails, else Live
   const show = (l) => {
     if (!l.badge) return;
-    const s = off ? "off" : l.held ? "paused" : "live";
+    const s = off ? "off" : l.held || idle ? "paused" : "live";
     l.badge.hidden = false; l.badge.dataset.state = s;
     l.badge.querySelector("span").textContent = s === "live" ? "Live" : s === "paused" ? "Paused" : "Reconnecting";
   };
@@ -112,28 +116,25 @@
     return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`;
   };
   const tick = (root) => root.querySelectorAll("time.age[data-ts]").forEach((t) => { t.textContent = ago(Number(t.dataset.ts)); });
-  setInterval(() => tick(document), 1000);
+  setInterval(() => { if (!document.hidden) tick(document); }, 1000);
 
-  // drip: one queued row at a time, oldest first, so the newest ends on top
+  const put = (l, row) => { tick(row); row.classList.add("in"); l.el.prepend(row); while (l.el.children.length > KEEP) l.el.lastElementChild.remove(); };
+  // drip: one queued row at a time, oldest first, spread over the poll interval
   const drip = (now) => {
     for (const l of lists) {
-      if (l.held || !l.queue.length) continue;
-      const every = Math.max(60, POLL / Math.max(1, l.queue.length + 1));
-      if (now - (l.at || 0) < every) continue;
+      if (l.held || !l.queue.length || now - (l.at || 0) < l.every) continue;
       l.at = now;
-      const row = l.queue.shift();
-      tick(row);
-      row.classList.add("in");
-      l.el.prepend(row);
-      while (l.el.children.length > KEEP) l.el.lastElementChild.remove();
+      put(l, l.queue.shift());
     }
     requestAnimationFrame(drip);
   };
   requestAnimationFrame(drip);
 
-  let wait = POLL;
   const poll = async () => {
-    if (document.hidden) return;
+    clearTimeout(timer); timer = 0;
+    if (document.hidden || idle || busy) return;
+    busy = true;
+    const gap = Date.now() - lastOk > 2 * POLL;
     try {
       const r = await fetch("/live", { cache: "no-store", credentials: "same-origin" });
       if (!r.ok || r.redirected) throw new Error(String(r.status));
@@ -146,19 +147,35 @@
       for (const l of lists) {
         const got = doc.getElementById(l.el.id);
         if (!got) throw new Error("no rows");
+        const rows = [...got.children].map((c) => document.importNode(c, true)); // newest first
+        if (gap && !l.held) { // back after a gap: the current rows, at once
+          l.queue = [];
+          rows.slice(0, KEEP).forEach(tick);
+          l.el.replaceChildren(...rows.slice(0, KEEP));
+          continue;
+        }
+        if (!l.held) while (l.queue.length) put(l, l.queue.shift()); // last poll's leftovers, at once
         const last = l.queue.at(-1) ?? l.el.firstElementChild, top = last ? Number(last.dataset.o) : 0;
-        const fresh = [...got.children].filter((c) => Number(c.dataset.o) > top).reverse().map((c) => document.importNode(c, true));
-        l.queue.push(...fresh);
-        const cap = l.held ? KEEP : 40; // paused: older ones would scroll off anyway
+        l.queue.push(...rows.filter((c) => Number(c.dataset.o) > top).reverse());
+        const cap = l.held ? KEEP : 60; // paused: older ones would scroll off anyway; else ~5 s of blocks, at the chain's pace
         if (l.queue.length > cap) l.queue.splice(0, l.queue.length - cap);
+        l.every = POLL / (l.queue.length + 1);
       }
-      wait = POLL; off = false;
+      lastOk = Date.now(); off = false;
     } catch {
-      wait = Math.min(wait * 2, 30000); off = true;
+      off = true;
     }
+    busy = false;
     lists.forEach(show);
+    if (!document.hidden && !idle) timer = setTimeout(poll, off ? Math.min(30_000, 2 * POLL + (Date.now() - lastOk)) : POLL);
   };
-  const loop = async () => { await poll(); setTimeout(loop, wait); };
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
-  setTimeout(loop, POLL);
+  const wake = () => {
+    seen = Date.now();
+    if (idle) { idle = false; lists.forEach(show); }
+    if (!timer && !document.hidden) poll();
+  };
+  for (const e of ["pointermove", "pointerdown", "keydown", "scroll", "touchstart"]) addEventListener(e, () => { seen = Date.now(); if (idle) wake(); }, { passive: true });
+  setInterval(() => { if (!idle && Date.now() - seen > IDLE) { idle = true; clearTimeout(timer); timer = 0; lists.forEach(show); } }, 30_000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
+  timer = setTimeout(poll, POLL);
 })();

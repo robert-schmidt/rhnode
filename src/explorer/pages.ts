@@ -140,7 +140,7 @@ async function latest(rpc: Rpc) {
   const [blocks, txs, net] = await Promise.all([
     rows<{ number: string; ts: number; tx_count: number; gas_used: string }>(
       `SELECT number, toUnixTimestamp(time) AS ts, tx_count, gas_used FROM raw_blocks
-       WHERE number > {lo:UInt64} AND sign = 1 ORDER BY number DESC LIMIT 40`, { lo: head - 200 }), // /live: ~4 s of blocks, so none is skipped
+       WHERE number > {lo:UInt64} AND sign = 1 ORDER BY number DESC LIMIT 60`, { lo: head - 200 }), // /live: ~6 s of blocks, so a 5 s poll skips none
     rows<{ hash: string; o: string; from: string; to: string; v: string; selector: string; status: number; created: string; ts: number }>(
       `SELECT hash, toString(block * 100000 + tx_index) AS o, \`from\`, \`to\`, toString(value) AS v, selector, status, created, toUnixTimestamp(time) AS ts FROM raw_txs
        WHERE block > {lo:UInt64} AND sign = 1 AND type != 106 ORDER BY block DESC, tx_index DESC LIMIT 15`, { lo: head - 50 }),
