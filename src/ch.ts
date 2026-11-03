@@ -15,6 +15,9 @@ const client = (w: string | undefined) => {
   if (!c) clients.set(w, c = createClient({ ...cfg.clickhouse, request_timeout: 60_000, keep_alive: { idle_socket_ttl: 8000 } }));
   return c;
 };
+// "apps_heavy/pools": ClickHouse workload apps_heavy, its own sockets (the lane after "/"). One client's pool-report sweeps held all
+// 10 apps_heavy sockets in every sample (2026-11-03), and its 50-token card batches waited behind them for 7-39 s.
+const wl = (w: string | undefined) => (w ? { workload: w.split("/")[0] } : {});
 
 /** The ClickHouse CPU workload (migrations 030, 031) of the queries and inserts run inside `workload.run(name, f)`.
  *  Under contention the box serves, in order: "default" (untagged: the node services at the tip, ingest and projector),
@@ -33,13 +36,13 @@ export async function insert(table: string, values: object[], token: string): Pr
     format: "JSONEachRow",
     // async_insert is on by default since ClickHouse 26.x; its path crashes when the token drops every row
     // ("Invalid partition key size: 0", seen 2026-10-29 on a replayed batch). We batch ourselves, so insert synchronously.
-    clickhouse_settings: { async_insert: 0, insert_deduplication_token: `${table}:${token}`, deduplicate_blocks_in_dependent_materialized_views: 1, ...(w ? { workload: w } : {}) },
+    clickhouse_settings: { async_insert: 0, insert_deduplication_token: `${table}:${token}`, deduplicate_blocks_in_dependent_materialized_views: 1, ...wl(w) },
   });
 }
 
 export async function rows<T>(query: string, query_params?: Record<string, unknown>): Promise<T[]> {
   const w = workload.getStore();
-  return (await client(w).query({ query, query_params, format: "JSONEachRow", ...(w ? { clickhouse_settings: { workload: w } } : {}) })).json<T>();
+  return (await client(w).query({ query, query_params, format: "JSONEachRow", clickhouse_settings: wl(w) })).json<T>();
 }
 
 /** The time span {t0, t1} of blocks (from, to], for `inSpan()`: raw/ev tables are partitioned by day on `time` and sorted by

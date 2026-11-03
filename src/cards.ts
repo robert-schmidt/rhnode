@@ -365,9 +365,9 @@ const memo = new Map<string, { at: number; p: Promise<Card | null> }>();
 /** Cards of lowercase token addresses; null for a token never seen. */
 export async function cards(up: Up, tokens: string[]): Promise<Map<string, Card | null>> {
   const fresh = (k: string) => { const m = memo.get(k); return m && Date.now() - m.at < 60_000; };
+  if (memo.size > 10_000) memo.clear(); // before `need`: clearing after it dropped the fresh ones ("reading 'p'", 2026-11-03)
   const need = tokens.filter((k) => !fresh(k));
   if (need.length) {
-    if (memo.size > 10_000) memo.clear();
     const all = build(up, need);
     for (const k of need) {
       const p = all.then((m) => m.get(k) ?? null);
