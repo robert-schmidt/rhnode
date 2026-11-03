@@ -31,8 +31,13 @@ else W="startsWith(name, 'ctl_') OR has(splitByChar(',', '$TABLES'), name)"; fi
 for t in $(q -q "SELECT name FROM system.tables WHERE database = 'rhnode' AND engine LIKE '%MergeTree'
     AND ($W) AND name != 'kept_transfers_by_wallet' ORDER BY name"); do
   q -q "SHOW CREATE TABLE $t" --format TSVRaw > "$OUT.tmp/$t.sql"
-  q -q "SELECT * FROM $t FORMAT Native" > "$OUT.tmp/$t.native" # to a file first: sh has no pipefail
-  printf "%s\t%s\n" "$t" "$(docker compose exec -T clickhouse clickhouse local --input-format Native -q "SELECT count() FROM table" < "$OUT.tmp/$t.native")" >> "$OUT.tmp/MANIFEST"
+  q -q "SELECT * FROM $t FORMAT Native" --log_comment "backup $OUT $t" > "$OUT.tmp/$t.native" # to a file first: sh has no pipefail
+  # the rows it wrote, from the server's log of that query: counting the file with clickhouse local from stdin held all
+  # of it in memory (9.4 GB, uncapped, for one table on 2026-11-03 03:42) and the kernel killed Nitro
+  q -q "SYSTEM FLUSH LOGS"
+  n=$(q -q "SELECT result_rows FROM system.query_log WHERE log_comment = 'backup $OUT $t' AND type = 'QueryFinish' ORDER BY event_time DESC LIMIT 1")
+  [ -n "$n" ] || { log "$t: no row count in query_log"; exit 1; }
+  printf "%s\t%s\n" "$t" "$n" >> "$OUT.tmp/MANIFEST"
   zstd -q --rm -T2 -6 "$OUT.tmp/$t.native"
 done
 (cd "$OUT.tmp" && sha256sum -- *.zst *.sql MANIFEST > SHA256SUMS)
