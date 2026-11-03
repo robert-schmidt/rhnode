@@ -20,7 +20,8 @@ export const RELAY_CONTRACTS = new Set([
   "0xccc88a9d1b4ed6b0eaba998850414b24f1c315be", // RelayApprovalProxyV3
   "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", // RelayRouterV3
   "0x0005ea38eb0a69d1253508ebdbdb9ea8cb26b5ef", // ERC1967Proxy on the Relay path
-  "0x0729e2a4716d9f7dd17858d5d504426d228697f7", // Relay v3.2 router (rhnode: seen in ingested txs 2026-10-29). ponytail: proxy 0xa834e703… not seen yet, add when found
+  "0x0729e2a4716d9f7dd17858d5d504426d228697f7", // Relay v3.2 router (rhnode: seen in ingested txs 2026-10-29)
+  "0xa834e70303322d86e5dae95ee47e9c6a073d9812", // Relay proxy: solvers call it, 0x0005ea38… executes (relay.ts proxyFillOf, 2026-11-03)
 ]);
 /** The app whose Relay requests are a trader's own buys. fomo tags its requests
  *  referrer 'fomo' and attaches its 0.5% app fee (40 + 10 bps, measured

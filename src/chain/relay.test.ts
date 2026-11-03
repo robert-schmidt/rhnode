@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fillOf, RELAY_ROUTER, RELAY_ROUTER_V32 } from "./relay.ts";
+import { fillOf, proxyFillOf, RELAY_ROUTER, RELAY_ROUTER_V32 } from "./relay.ts";
 import { USDG } from "./constants.ts";
 
 const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -39,4 +39,32 @@ test("fillOf on the v3.2 router: the real buy is a fill to the buyer, paid in US
 
 test("fillOf on the v3.2 router: the real sell into the v4 PoolManager is not a fill", () => {
   assert.equal(fillOf("0xfecd", real.sell, RELAY_ROUTER_V32), null);
+});
+
+// Real proxy-path fills (solver -> 0xa834e703..., executor 0x0005ea38...), 2026-11-03 sample of 400 txs since go-live
+const px = JSON.parse(readFileSync(new URL("./fixtures/relayproxy.json", import.meta.url), "utf8")) as Record<string, { hash: string; logs: { address: string; topics: string[]; data: string }[] }>;
+const pf = (k: string) => proxyFillOf(px[k].hash, px[k].logs);
+
+test("proxyFillOf: the executor delivers to the buyer, paid in wrapped ETH", () => {
+  const f = pf("executor")!;
+  assert.equal(f.recipient, "0xfdd0a3fc4fc504cce0ce67bbfc6244765482bf2b");
+  assert.equal(f.token, "0xc57b8b353b684aebc13869abcfa240ee40ee2447");
+  assert.equal(f.wethIn, 22305582573678848n);
+});
+test("proxyFillOf: the pool the executor paid delivers to the buyer directly", () => {
+  const f = pf("poolDirect")!;
+  assert.equal(f.recipient, "0x1314a2932ef8b02e371859eaf81615cda3d1f9e1");
+  assert.equal(f.raw, 262410549878718002176n);
+  assert.equal(f.wethIn, 27519641566877282n);
+});
+test("proxyFillOf: WETH minted and burned again to pay an ETH pool still counts as paid", () => {
+  const f = pf("wrapBurn")!;
+  assert.equal(f.recipient, "0x37d7991ae87f4f739dfb6a65bae30eca71a0fbeb");
+  assert.equal(f.wethIn, 11060946795868913n);
+});
+test("proxyFillOf: a WETH-only delivery (bridged ETH) is no token buy", () => {
+  assert.equal(pf("wethOnly"), null);
+});
+test("fillOf on the routers misses all four proxy fills (why proxyFillOf exists)", () => {
+  for (const k of Object.keys(px)) for (const r of [RELAY_ROUTER_V32, RELAY_ROUTER]) assert.equal(fillOf(px[k].hash, px[k].logs, r), null);
 });

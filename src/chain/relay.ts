@@ -38,3 +38,35 @@ export function fillOf(hash: string, logs: Log[], router: string = RELAY_ROUTER)
   return { hash: hash.toLowerCase(), recipient: addr(out.topics[2]), token: out.address.toLowerCase(), raw: amount(out.data), usdgIn, wethIn,
     block: out.blockNumber ? parseInt(out.blockNumber, 16) : null };
 }
+
+/** The proxy path (found 2026-11-03: 75,113 fills since go-live that fillOf missed, vs 86.7K on the v3.2 router): a solver
+ *  calls RELAY_PROXY, and the executor 0x0005ea38… wraps the ETH, swaps, and delivers. In 349 of a 400-tx sample the
+ *  executor hands the token to the buyer; in ~12% the last pool sends it to the buyer directly. */
+export const RELAY_PROXY = "0xa834e70303322d86e5dae95ee47e9c6a073d9812";
+export const RELAY_EXECUTOR = "0x0005ea38eb0a69d1253508ebdbdb9ea8cb26b5ef";
+
+/** PURE. A proxy fill's logs → the buy, or null. A delivery is a non-stable Transfer from the executor, or from an address
+ *  the executor paid (a pool), to an address that sends nothing in the tx (a pool or hop forwards; a buyer doesn't); of
+ *  the last delivered token, the biggest such Transfer (a fee split sends a small one too). The money is what came into
+ *  the executor from addresses it didn't pay: the solver's ETH, wrapped (WETH minted to it), or USDG/WETH sent in. */
+export function proxyFillOf(hash: string, logs: Log[]): ChainFill | null {
+  const x = RELAY_EXECUTOR, transfers = logs.filter((l) => l.topics?.[0]?.toLowerCase() === TRANSFER && l.topics.length >= 3);
+  // not the zero address: WETH minted to the executor and burned again to pay an ETH pool is still the solver's money
+  const paid = new Set(transfers.filter((l) => addr(l.topics[1]) === x && !/^0x0{40}$/.test(addr(l.topics[2]))).map((l) => addr(l.topics[2])));
+  const senders = new Set(transfers.map((l) => addr(l.topics[1])));
+  let usdgIn = 0n, wethIn = 0n;
+  const outs: Log[] = [];
+  for (const l of transfers) {
+    const token = l.address.toLowerCase(), from = addr(l.topics[1]), to = addr(l.topics[2]);
+    if (to === x && !paid.has(from)) { // the proxy's own USDG/WETH counts: it is what the solver put in
+      if (token === usdg) usdgIn += amount(l.data);
+      else if (token === weth) wethIn += amount(l.data);
+    }
+    if ((from === x || paid.has(from)) && token !== usdg && token !== weth && !RELAY_CONTRACTS.has(to) && !senders.has(to) && amount(l.data) > 0n) outs.push(l);
+  }
+  if (!outs.length) return null;
+  const tok = outs[outs.length - 1].address.toLowerCase();
+  const out = outs.filter((l) => l.address.toLowerCase() === tok).reduce((a, b) => (amount(b.data) > amount(a.data) ? b : a));
+  return { hash: hash.toLowerCase(), recipient: addr(out.topics[2]), token: tok, raw: amount(out.data), usdgIn, wethIn,
+    block: out.blockNumber ? parseInt(out.blockNumber, 16) : null };
+}

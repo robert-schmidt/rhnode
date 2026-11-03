@@ -4,7 +4,7 @@
 import { decodeAbiParameters } from "viem";
 import { decodeChainLog, registryEntries, type RawLog } from "../chain/registry.ts";
 import { decodeSwap } from "../chain/swaplog.ts";
-import { fillOf, RELAY_ROUTERS } from "../chain/relay.ts";
+import { fillOf, proxyFillOf, RELAY_PROXY, RELAY_ROUTERS } from "../chain/relay.ts";
 import { KEEP, type KeepCtx } from "./keep.ts";
 
 export type RpcTx = { hash: string; from: string; to: string | null; value: string; input: string; nonce: string; type: string; transactionIndex: string };
@@ -118,6 +118,7 @@ export function decodeBlock(b: RpcBlock, receipts: RpcReceipt[], ctx: KeepCtx): 
 
     let f = null;
     for (const r of RELAY_ROUTERS) if ((f = fillOf(hash, rc.logs, r))) break;
+    if (!f && to === RELAY_PROXY && rc.status !== "0x0") f = proxyFillOf(hash, rc.logs);
     if (f) out.ev_relay.push({ ...base, tx_hash: hash, recipient: f.recipient, token: f.token, amount: f.raw.toString(), usdg_in: f.usdgIn.toString(), weth_in: f.wethIn.toString() });
     blockKeep |= keep;
   });
