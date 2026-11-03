@@ -95,17 +95,18 @@ export type Reply = { status: number; body: unknown };
 // memoised 30 s per query, shared by the API and the explorer. ponytail: a closed window could be cached for good, but
 // balances and funding move; split the two if this ever shows up as load.
 const memo = new Map<string, { at: number; p: Promise<Reply> }>();
-export function earlyBuyers(up: Up, t: string, blocks: number, n: number, minutes = 0): Promise<Reply> {
-  const k = `${t}:${blocks}:${n}:${minutes}`, m = memo.get(k);
+/** `before` (a block): the buyers in the `blocks` before it (from launch at the earliest) instead of those after launch. */
+export function earlyBuyers(up: Up, t: string, blocks: number, n: number, minutes = 0, before = 0): Promise<Reply> {
+  const k = `${t}:${blocks}:${n}:${minutes}:${before}`, m = memo.get(k);
   if (m && Date.now() - m.at < 30_000) return m.p;
   if (memo.size > 5_000) memo.clear();
-  const p = build(up, t, blocks, n, minutes);
+  const p = build(up, t, blocks, n, minutes, before);
   memo.set(k, { at: Date.now(), p });
   p.catch(() => memo.delete(k));
   return p;
 }
 
-async function build(up: Up, t: string, blocks: number, n: number, minutes: number): Promise<Reply> {
+async function build(up: Up, t: string, blocks: number, n: number, minutes: number, before: number): Promise<Reply> {
   const [[meta], [launch], pools, [created], [tip]] = await Promise.all([
     rows<{ supply: string }>("SELECT toString(total_supply) AS supply FROM serve_tokens FINAL WHERE token = {t:String}", { t }),
     rows<{ block: string; source: string; deployer: string; detail: string }>(
@@ -123,7 +124,10 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
     from = Number(m?.b ?? 0); source = "mint";
   }
   if (!from) return { status: 404, body: { error: "no launch, pool or mint of this token is indexed" } };
-  const to = from + blocks, head = Number(tip?.b ?? 0), supply = BigInt(meta.supply);
+  const launchBlock = from;
+  if (before && before <= from) return { status: 400, body: { error: `before ${before} is not after the launch (${from})` } };
+  if (before) from = Math.max(from, before - blocks);
+  const to = before ? before - 1 : from + blocks, head = Number(tip?.b ?? 0), supply = BigInt(meta.supply);
   let curve = "", pair = "";
   try { const d = JSON.parse(launch?.detail ?? "{}"); curve = String(d.curve ?? "").toLowerCase(); pair = String(d.pairToken ?? "").toLowerCase(); } catch { /* no detail */ }
   const quoteTokens = [...new Set([WETH, USDG, ...(/^0x[0-9a-f]{40}$/.test(pair) && pair !== ZERO ? [pair] : [])])];
@@ -205,7 +209,7 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
     : markets.has(b.from) ? "pool" : b.from === ZERO ? "mint" : "transfer");
 
   return { status: 200, body: {
-    token: t, launch_block: from, launch_source: source, window: { from_block: from, to_block: to }, closed: to <= head,
+    token: t, launch_block: launchBlock, launch_source: source, window: { from_block: from, to_block: to }, closed: to <= head,
     total_supply: supply.toString(), deployer, deployer_first_funder: deployerFunder, skipped, truncated, pair_token: pair && pair !== ZERO ? pair : null,
     eth_usd: ethUsd, launch_time: t0 || null,
     ...(minutes ? { minutes: perMinute(tape, new Set([...skip, ...vaults]), t0, minutes) } : {}),
