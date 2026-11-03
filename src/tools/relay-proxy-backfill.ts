@@ -37,18 +37,18 @@ await workload.run("bulk", async () => {
   const sum = { txs: 0, fills: 0, trades: 0 }, t0 = Date.now();
   for (let a = Number(process.argv[4] ?? f0.b); a <= to; a += CHUNK) {
     const b = Math.min(to, a + CHUNK - 1);
-    const ix = await rows<{ block: string; tx_index: number }>(
-      "SELECT toString(block) AS block, tx_index FROM idx_wallet_txs WHERE wallet = {p:String} AND block BETWEEN {a:UInt64} AND {b:UInt64} ORDER BY block, tx_index",
+    const ix = await rows<{ bk: string; tx_index: number }>(
+      "SELECT toString(block) AS bk, tx_index FROM idx_wallet_txs WHERE wallet = {p:String} AND block BETWEEN {a:UInt64} AND {b:UInt64} ORDER BY block, tx_index",
       { p: RELAY_PROXY, a, b });
     if (!ix.length) continue;
     // hash, time, keep: raw_txs from go-live (14 days), else the node
-    const live = new Map((a >= goLive || b >= goLive ? await rows<{ block: string; tx_index: number; hash: string; time: number; keep: number }>(
-      `SELECT toString(block) AS block, tx_index, toString(hash) AS hash, toUnixTimestamp(time) AS time, keep FROM raw_txs
-       WHERE to = {p:String} AND block BETWEEN {a:UInt64} AND {b:UInt64} AND sign = 1`, { p: RELAY_PROXY, a, b }) : []).map((r) => [`${r.block}.${r.tx_index}`, r]));
+    const live = new Map((a >= goLive || b >= goLive ? await rows<{ bk: string; tx_index: number; h: string; ts: number; keep: number }>(
+      `SELECT toString(block) AS bk, tx_index, toString(hash) AS h, toUnixTimestamp(time) AS ts, keep FROM raw_txs
+       WHERE to = {p:String} AND block BETWEEN {a:UInt64} AND {b:UInt64} AND sign = 1`, { p: RELAY_PROXY, a, b }) : []).map((r) => [`${r.bk}.${r.tx_index}`, r]));
     const times = new Map<number, number>();
     const txs: Tx[] = await pool(ix, async (r) => {
-      const n = Number(r.block), l = live.get(`${r.block}.${r.tx_index}`);
-      if (l) return { block: n, tx_index: r.tx_index, hash: l.hash, time: l.time, keep: l.keep };
+      const n = Number(r.bk), l = live.get(`${r.bk}.${r.tx_index}`);
+      if (l) return { block: n, tx_index: r.tx_index, hash: l.h, time: l.ts, keep: l.keep };
       const t = await up.call<{ hash: string }>("eth_getTransactionByBlockNumberAndIndex", [hex(n), hex(r.tx_index)]);
       if (!times.has(n)) times.set(n, parseInt((await up.call<{ timestamp: string }>("eth_getBlockByNumber", [hex(n), false])).timestamp, 16));
       return { block: n, tx_index: r.tx_index, hash: t.hash.toLowerCase(), time: times.get(n)!, keep: KEEP.RELAY };
