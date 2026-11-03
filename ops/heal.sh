@@ -17,8 +17,11 @@ if [ -n "$missing" ]; then echo "not running: $(echo $missing); starting"; docke
 # Nitro (2026-11-01, after the kernel OOM-killed it at 12:24 UTC and it replayed ~49K unsaved blocks): Docker restarts a
 # crashed Nitro, but not a stuck one, and a kill loses the state it hadn't persisted. So a clean restart (SIGINT, it
 # persists first; stop_grace_period 5m) when its head hasn't moved for 10 min (the chain moves ~10 blocks a second), or
-# before the kernel would kill it: ≥95% of its memory cap, or under 1 GB available on the box. At most one restart per
+# before the kernel would kill it: ≥85% of its memory cap, or under 3 GB available on the box. At most one restart per
 # 30 min and 3 per 6 h; after that it's left alone, and /health shows it. Log: journalctl -u rhnode-heal.
+# 95% / 1 GB was too late (2026-11-03 03:42): the kernel killed Nitro at 18.3 GB (87% of 21) when a ClickHouse spike took
+# the box's last ~7 GB between two 2-minute checks; it replayed ~47K blocks. Nitro grows ~0.3 GB an hour (16.2 GB at
+# 21:07, 17.8 at 02:36), so 85% is a clean restart every few hours at most.
 echo "$running" | grep -qx nitro || exit 0
 S=/run/rhnode-nitro; mkdir -p $S; now=$(date +%s)
 ip=$(grep -s '^NODE_BIND=' .env | cut -d= -f2); case "${ip:-0.0.0.0}" in 0.0.0.0) ip=127.0.0.1;; esac
@@ -31,8 +34,8 @@ mem=$(docker stats --no-stream --format '{{.MemPerc}}' rhnode-nitro-1 | tr -d '%
 avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
 why=""
 [ $((now - $(cat $S/moved))) -ge 600 ] && why="head stuck at $head for $(( (now - $(cat $S/moved)) / 60 )) min"
-[ "${mem:-0}" -ge 95 ] && why="memory at ${mem}% of its cap"
-[ "$avail" -lt 1000 ] && why="${avail} MB available on the box (nitro at ${mem}%)"
+[ "${mem:-0}" -ge 85 ] && why="memory at ${mem}% of its cap"
+[ "$avail" -lt 3000 ] && why="${avail} MB available on the box (nitro at ${mem}%)"
 [ -z "$why" ] && exit 0
 recent=$(awk -v t=$((now - 21600)) '$1 > t' $S/restarts 2>/dev/null | wc -l)
 last=$(tail -1 $S/restarts 2>/dev/null | cut -d' ' -f1)
