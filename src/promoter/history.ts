@@ -28,6 +28,7 @@ const MAX_LAG = 50; // blocks ingest may trail our node before the pass waits
 const PROJ_MAX_LAG = 300; // and the projector
 const INSERT_ROWS = 100_000;
 const PROJECT_EVERY = 1_000_000; // blocks between re-projections of the tokens it touched
+const PROJECT_SLICE = 1_000; // tokens projected at one tip read (~25 s)
 const HIST = { raw_txs: "hist_txs", raw_logs: "hist_logs", ev_transfers: "hist_transfers", ev_swaps: "hist_swaps", ev_launches: "hist_launches", ev_pools: "hist_pools", ev_relay: "hist_relay" } as const;
 type Hist = { [K in keyof typeof HIST]: object[] };
 type Transfer = { token: string; from: string; to: string; amount: string; standard: string };
@@ -160,12 +161,20 @@ export async function history(up: Client, golive: number): Promise<void> {
       await ch.insert({ table: "ctl_cursors", values: ["walk", "scan"].map((name) => ({ name, block: lo, hash: "", version: Date.now() })), format: "JSONEachRow" });
       floor = lo;
       if (projectedAt - floor >= PROJECT_EVERY || floor === 0) {
-        const [tip] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'tip'");
-        const t1 = Date.now(); // ~7 min for 1M blocks' tokens (2026-11-01): logged, so a pause here isn't read as a stall
-        console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projecting: dirty.size }));
-        await projectTokens(up, [...dirty], Number(tip.block), `history:${floor}`);
-        console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projected: dirty.size, ms: Date.now() - t1 }));
-        dirty.clear();
+        const t1 = Date.now(), n = dirty.size; // ~18 min for 1M blocks' tokens (48K, 2026-11-04): logged, so a pause here isn't read as a stall
+        console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projecting: n }));
+        // Slices at a fresh tip each: our node keeps ~1,200 blocks (~2 min) of state, and one tip read for the whole step
+        // went stale minutes in ("historical state ... is not available", then the public fallback "out of gas"), threw the
+        // step away and retried it after every chunk (2,000 blocks per ~4 min from 12.624M, 2026-11-04). A slice done
+        // leaves `dirty`, so a failure retries only the rest.
+        const list = [...dirty];
+        for (let i = 0; i < list.length; i += PROJECT_SLICE) {
+          const s = list.slice(i, i + PROJECT_SLICE);
+          const [tip] = await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = 'tip'");
+          await projectTokens(up, s, Number(tip.block), `history:${floor}`);
+          for (const t of s) dirty.delete(t);
+        }
+        console.log(JSON.stringify({ at: new Date().toISOString(), history: floor, projected: n, ms: Date.now() - t1 }));
         projectedAt = floor;
         await ch.insert({ table: "ctl_cursors", values: [{ name: "history_projected", block: floor, hash: "", version: Date.now() }], format: "JSONEachRow" });
       }
