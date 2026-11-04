@@ -244,15 +244,24 @@ export async function depths(up: Up, token: string, ps: Tip[]): Promise<Map<stri
   }));
 }
 
+// The main pool chosen for a token launched over a day ago (or with no launch row), kept 10 min: choosing reads every
+// pool of the token and its all-time candles (NVDA: 82K pools, 776K candle rows; 2.3 CPU-s per 50-token batch, 371 CPU-s
+// per 10 min on 2026-11-04). Price, liquidity and volume stay live; only the choice waits. A young token's choice (its
+// curve graduating) is made every build. ponytail: cleared wholesale at 10K keys.
+const PICK_MS = 600_000, YOUNG_S = 86_400;
+const picked = new Map<string, { at: number; p: Pool }>();
+
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
-  const t = tokens;
+  const t = tokens, now = Date.now();
+  if (picked.size > 10_000) picked.clear();
+  const keep = t.filter((k) => now - (picked.get(k)?.at ?? 0) < PICK_MS), choose = t.filter((k) => !keep.includes(k));
   const [meta, launches, cands, trades, vols, eu, [tip], tops] = await Promise.all([
     rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
       "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t }),
     rows<{ token: string; deployer: string; source: string; block: string; time: number; detail: string }>(
       `SELECT token, deployer, source, toString(block) AS block, toUnixTimestamp(time) AS time, detail FROM kept_launches FINAL
        PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1 ORDER BY block LIMIT 1 BY token`, { t }), // PREWHERE: as in OFFICIAL
-    rows<Pool>(
+    !choose.length ? [] : rows<Pool>(
       // an official pool with no trade yet is a candidate too (volume 0)
       `SELECT c.token AS token, c.pool AS pool, toString(p.venue) AS venue, n.nv AS v24, n.rv AS raw24, c.vol AS v, p.verified AS verified,
          p.token0 AS token0, p.token1 AS token1, toString(p.created_block) AS created_block, p.tick_spacing AS spacing, o.token != '' AS official
@@ -263,13 +272,13 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
          PREWHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)} WHERE ok = 1) AS p ON p.pool = c.pool
        LEFT JOIN (${OFFICIAL}) AS o ON o.token = c.token
        WHERE o.token = '' OR c.pool = o.op
-       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token ${BY_TOKEN}`, { t }),
+       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token ${BY_TOKEN}`, { t: choose }),
     rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
          uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
        FROM ev_trades WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token`, { t }),
-    rows<{ token: string } & Record<string, number>>(`SELECT token, round(sum(nv), 2) AS v24, round(sum(rv), 2) AS raw24, round(sum(nv6), 2) AS v6,
-      round(sum(rv6), 2) AS raw6, round(sum(nv1), 2) AS v1, round(sum(rv1), 2) AS raw1 FROM (${NET24}) GROUP BY token`, { t }),
+    rows<{ token: string; pool: string } & Record<string, number>>(`SELECT token, pool, nv AS v24, rv AS raw24, nv6 AS v6, rv6 AS raw6, nv1 AS v1, rv1 AS raw1
+      FROM (${NET24})`, { t }),
     eth(),
     rows<{ b: string; pb: string }>("SELECT maxIf(block, name = 'tip') AS b, maxIf(block, name = 'projector') AS pb FROM ctl_cursors FINAL WHERE name IN ('tip', 'projector')"),
     rows<{ token: string; wallet: string; share: number }>(
@@ -278,7 +287,18 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   ]);
   const ingested = Number(tip?.b ?? 0), projected = Number(tip?.pb ?? 0);
   const by = <T extends { token: string }>(xs: T[]) => new Map(xs.map((x) => [x.token, x]));
-  const M = by(meta), L = by(launches), P = by(cands), T = by(trades), V = by(vols), W = by(tops);
+  const M = by(meta), L = by(launches), T = by(trades), W = by(tops);
+  for (const p of cands) if (!(now / 1000 - (L.get(p.token)?.time ?? 0) < YOUNG_S)) picked.set(p.token, { at: now, p });
+  const P = new Map([...keep.map((k) => [k, picked.get(k)!.p] as const), ...cands.map((p) => [p.token, p] as const)]);
+  // per token: the sums over its pools; per main pool: its own (the choice may be cached, its volume isn't)
+  const V = new Map<string, Record<string, number>>(), VP = new Map<string, Record<string, number>>();
+  for (const { token, pool, ...r } of vols) {
+    const v = V.get(token) ?? {};
+    for (const [k, x] of Object.entries(r)) v[k] = (v[k] ?? 0) + Number(x);
+    V.set(token, v);
+    if (P.get(token)?.pool === pool) VP.set(token, r);
+  }
+  const r2 = (x: number | undefined) => Math.round((x ?? 0) * 100) / 100;
   const curve = (tk: string) => { try { const c = JSON.parse(L.get(tk)?.detail ?? "{}").curve; return typeof c === "string" && ADDR.test(c.toLowerCase()) ? c.toLowerCase() : null; } catch { return null; } };
   const curves = t.map(curve).filter((c): c is string => !!c);
 
@@ -330,7 +350,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
         price: ms?.price ?? null, price_usd: ms?.price != null && qUsd != null ? ms.price * qUsd : null,
         liquidity_usd: ms?.liquidityUsd ?? null, liquidity_quote_usd: ms?.quoteUsd ?? null, liquidity_kind: ms?.kind ?? null,
         ...(p.venue === "v3" ? { liquidity_balances_usd: ms?.balancesUsd ?? null } : {}),
-        volume_24h_usd: Math.round(p.v24 * 100) / 100, volume_24h_raw_usd: Math.round(p.raw24 * 100) / 100,
+        volume_24h_usd: r2(VP.get(tk)?.v24), volume_24h_raw_usd: r2(VP.get(tk)?.raw24),
       };
     }
     const lc = L.get(tk), tr = T.get(tk), pu = (main?.price_usd as number | null) ?? null;
@@ -345,7 +365,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       creator: lc?.deployer || null, launchpad: lc?.source ?? null, launch_block: lc ? Number(lc.block) : null, launch_time: lc?.time ?? null,
       main_pool: main,
       ...Object.fromEntries(WINDOWS.map(([h]) => [`h${h}`, {
-        volume_usd: V.get(tk)?.[`v${h}`] ?? 0, volume_raw_usd: V.get(tk)?.[`raw${h}`] ?? 0, buys: Number(tr?.[`buys${h}`] ?? 0), sells: Number(tr?.[`sells${h}`] ?? 0),
+        volume_usd: r2(V.get(tk)?.[`v${h}`]), volume_raw_usd: r2(V.get(tk)?.[`raw${h}`]), buys: Number(tr?.[`buys${h}`] ?? 0), sells: Number(tr?.[`sells${h}`] ?? 0),
         buyers: Number(tr?.[`buyers${h}`] ?? 0), sellers: Number(tr?.[`sellers${h}`] ?? 0),
         ...(h === "24" ? { top_wallet: W.get(tk) ? { wallet: W.get(tk)!.wallet, share: Math.round(W.get(tk)!.share * 10_000) / 10_000 } : null } : {}),
       }])),
