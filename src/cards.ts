@@ -248,7 +248,7 @@ export async function depths(up: Up, token: string, ps: Tip[]): Promise<Map<stri
 // pool of the token and its all-time candles (NVDA: 82K pools, 776K candle rows; 2.3 CPU-s per 50-token batch, 371 CPU-s
 // per 10 min on 2026-11-04). Price, liquidity and volume stay live; only the choice waits. A young token's choice (its
 // curve graduating) is made every build. ponytail: cleared wholesale at 10K keys.
-const PICK_MS = 600_000, YOUNG_S = 86_400;
+const PICK_MS = 600_000, YOUNG_S = 86_400, DRY = 10; // DRY: USD on the quote side
 const picked = new Map<string, { at: number; p: Pool }>();
 
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
@@ -376,6 +376,14 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       })),
       block: ingested, price_block: projected,
     });
+  }
+  // a kept choice that went dry (its LP pulled: no price, or under DRY on the quote side) is made again in this build,
+  // so an older token doesn't mark off a dead pool for 10 min; a token whose every pool is that thin chooses every build
+  const dry = keep.filter((k) => { const m = out.get(k)?.main_pool as Card | null | undefined;
+    return m != null && (m.price_usd == null || ((m.liquidity_quote_usd as number | null) ?? 0) < DRY); });
+  if (dry.length) {
+    for (const k of dry) picked.delete(k);
+    for (const [k, c] of await build(up, dry)) out.set(k, c);
   }
   return out;
 }
