@@ -250,10 +250,15 @@ export async function depths(up: Up, token: string, ps: Tip[]): Promise<Map<stri
 // curve graduating) is made every build. ponytail: cleared wholesale at 10K keys.
 const PICK_MS = 600_000, YOUNG_S = 86_400, DRY = 10; // DRY: USD on the quote side
 const picked = new Map<string, { at: number; p: Pool }>();
+// The same for a day-old token's holdings (locker/burn/launchpad balances, top10): the agg_balances reads were 1.9 CPU-s a
+// build (467 CPU-s per 10 min, 2026-11-04 07:31-08:01). Price stays live; market cap and top10 lag up to 10 min.
+type Hold = { held: { token: string; holder: string; amt: string }[]; top: { token: string; top: string }[] };
+const holds = new Map<string, { at: number } & Hold>();
 
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const t = tokens, now = Date.now();
   if (picked.size > 10_000) picked.clear();
+  if (holds.size > 10_000) holds.clear();
   const keep = t.filter((k) => now - (picked.get(k)?.at ?? 0) < PICK_MS), choose = t.filter((k) => !keep.includes(k));
   const [meta, launches, cands, trades, vols, eu, [tip], tops] = await Promise.all([
     rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
@@ -303,7 +308,9 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const curves = t.map(curve).filter((c): c is string => !!c);
 
   // Holdings that aren't circulating, and top10 without protocol addresses (only for tokens whose history is complete)
-  const full = t.filter((tk) => M.get(tk)?.complete);
+  const old = (tk: string) => !(now / 1000 - (L.get(tk)?.time ?? 0) < YOUNG_S);
+  const full = t.filter((tk) => M.get(tk)?.complete && !(now - (holds.get(tk)?.at ?? 0) < PICK_MS));
+  const kept = t.filter((tk) => M.get(tk)?.complete && !full.includes(tk));
   const special = [DEAD, ...LOCKERS, ...LAUNCHPADS, ...curves];
   // the tokens' own pools and hooks are left out in the query: a quote token like WETH has thousands, and query
   // parameters travel in the URL (a cold batch with WETH in it failed "URI too long")
@@ -319,6 +326,8 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
              WHERE (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}) AND length(a) = 42)
          ORDER BY b DESC LIMIT 10 BY token) GROUP BY token ${BY_TOKEN}`, { t: full, x: exclude }),
   ]) : [[], []];
+  for (const tk of full) if (old(tk)) holds.set(tk, { at: now, held: held.filter((r) => r.token === tk), top: top.filter((r) => r.token === tk) });
+  for (const tk of kept) { const k = holds.get(tk)!; held.push(...k.held); top.push(...k.top); }
 
   const other = (p: Pool) => (p.token0 === p.token ? p.token1 : p.token0);
   const B = await bridgeUsd([...new Set([...P.values()].filter((p) => !sides(p.token0, p.token1)).map(other))]);
