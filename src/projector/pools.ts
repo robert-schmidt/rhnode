@@ -154,10 +154,13 @@ async function resolveV4(lookup: Client, p: { pool: string; manager: string }): 
  *  these pools (a backfill's, src/tools/venue-backfill.ts). */
 export async function resolvePools(up: Client, lookup: Client, from: number, to: number, only?: string[]): Promise<{ v23: number; v4: number; failed: number }> {
   const unknown = (await rows<{ pool: string; vn: string; manager: string }>(
-    `SELECT pool, any(venue) AS vn, any(emitter) AS manager FROM ev_swaps
-     WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND venue != 'curve' -- a curve's row comes from its launch (migration 021)
-       AND pool NOT IN (SELECT pool FROM pools FINAL WHERE verified = 1 OR version > {retry:UInt64}) ${only ? "AND pool IN {only:Array(String)}" : ""}
-     GROUP BY pool`,
+    // only the tick's pools are looked up in pools (keyed by pool): a set of every verified pool was 849 MiB a tick once
+    // the history pass had filled pools (2.5M rows); this is 225 MiB (2026-11-05)
+    `WITH seen AS (SELECT pool, any(venue) AS vn, any(emitter) AS manager FROM ev_swaps
+       WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND venue != 'curve' -- a curve's row comes from its launch (migration 021)
+         ${only ? "AND pool IN {only:Array(String)}" : ""} GROUP BY pool)
+     SELECT pool, vn, manager FROM seen
+     WHERE pool NOT IN (SELECT pool FROM pools FINAL WHERE pool IN (SELECT pool FROM seen) AND (verified = 1 OR version > {retry:UInt64}))`,
     { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000, ...(only ? { only } : {}) },
   )).map(({ vn, ...u }) => ({ ...u, venue: vn }));
   const v23 = await resolveV23(up, unknown.filter((u) => u.venue === "v2" || u.venue === "v3"));
