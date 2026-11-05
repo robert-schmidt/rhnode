@@ -255,29 +255,52 @@ const picked = new Map<string, { at: number; p: Pool }>();
 type Hold = { held: { token: string; holder: string; amt: string }[]; top: { token: string; top: string }[] };
 const holds = new Map<string, { at: number } & Hold>();
 
+/** The main pool of each token: verified first, then 24 h net volume, then all-time volume. One query used to do it all,
+ * but it read all of pools by token (a batch's tokens are in ~900K pools, mostly as the quote) and NET24 again: 19 s, 680
+ * MiB for 48 tokens under load (2026-11-05 17:45). The candidates' pools by key instead, ranked here with build's NET24. */
+export async function choosePools(choose: string[], cv: [{ token: string; pool: string; v: number }[], { token: string; op: string }[]] | null,
+  vols: ({ token: string; pool: string } & Record<string, number>)[]): Promise<Pool[]> {
+  if (!cv) return [];
+  const [vs, offs] = cv, off = new Map(offs.map((o) => [o.token, o.op]));
+  // a launchpad token's only candidate is its own pool (none while op is ''), with no trade yet too
+  const c = [...vs.filter((x) => !off.has(x.token) || x.pool === off.get(x.token)),
+    ...offs.filter((o) => o.op && !vs.some((x) => x.token === o.token && x.pool === o.op)).map((o) => ({ token: o.token, pool: o.op, v: 0 }))];
+  const ps = [...new Set(c.map((x) => x.pool))], P = new Map<string, Omit<Pool, "token" | "v24" | "raw24" | "v" | "official">>();
+  // parameters travel in the URL: chunks of 500 pools (~35 KB)
+  for (const r of (await Promise.all(Array.from({ length: Math.ceil(ps.length / 500) }, (_, i) => rows<Omit<Pool, "token" | "v24" | "raw24" | "v" | "official">>(
+    `SELECT pool, toString(venue) AS venue, verified, token0, token1, toString(created_block) AS created_block, tick_spacing AS spacing FROM pools FINAL
+     PREWHERE pool IN {p:Array(String)} WHERE ok = 1 AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})`, { p: ps.slice(i * 500, i * 500 + 500), t: choose })))).flat()) P.set(r.pool, r);
+  const n = new Map(vols.map((x) => [`${x.token} ${x.pool}`, x]));
+  const best = new Map<string, Pool>();
+  for (const x of c) {
+    const p = P.get(x.pool);
+    if (!p) continue;
+    const nv = n.get(`${x.token} ${x.pool}`);
+    const q: Pool = { ...p, token: x.token, v: Number(x.v), v24: Number(nv?.v24 ?? 0), raw24: Number(nv?.raw24 ?? 0), official: off.has(x.token) ? 1 : 0 };
+    const b = best.get(x.token);
+    if (!b || (q.verified - b.verified || q.v24 - b.v24 || q.v - b.v) > 0) best.set(x.token, q);
+  }
+  return [...best.values()];
+}
+
 async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const t = tokens, now = Date.now();
   if (picked.size > 10_000) picked.clear();
   if (holds.size > 10_000) holds.clear();
-  const keep = t.filter((k) => now - (picked.get(k)?.at ?? 0) < PICK_MS), choose = t.filter((k) => !keep.includes(k));
-  const [meta, launches, cands, trades, vols, eu, [tip], tops] = await Promise.all([
+  // snapshot the cached choices: a concurrent build can clear or delete picked entries while this one awaits
+  const cached = new Map(t.flatMap((k) => { const e = picked.get(k); return e && now - e.at < PICK_MS ? [[k, e.p] as const] : []; }));
+  const keep = [...cached.keys()], choose = t.filter((k) => !cached.has(k));
+  const [meta, launches, cv, trades, vols, eu, [tip], tops] = await Promise.all([
     rows<{ token: string; name: string; symbol: string; decimals: number; supply: string; holders: string; complete: number }>(
       "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t }),
     rows<{ token: string; deployer: string; source: string; block: string; time: number; detail: string }>(
       `SELECT token, deployer, source, toString(block) AS block, toUnixTimestamp(time) AS time, detail FROM kept_launches FINAL
        PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1 ORDER BY block LIMIT 1 BY token`, { t }), // PREWHERE: as in OFFICIAL
-    !choose.length ? [] : rows<Pool>(
-      // an official pool with no trade yet is a candidate too (volume 0)
-      `SELECT c.token AS token, c.pool AS pool, toString(p.venue) AS venue, n.nv AS v24, n.rv AS raw24, c.vol AS v, p.verified AS verified,
-         p.token0 AS token0, p.token1 AS token1, toString(p.created_block) AS created_block, p.tick_spacing AS spacing, o.token != '' AS official
-       FROM (SELECT token, pool, sum(vu) AS vol FROM (SELECT token, pool, sum(volume_usd) AS vu FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool
-             UNION ALL SELECT token, op AS pool, 0 AS vu FROM (${OFFICIAL}) WHERE op != '') GROUP BY token, pool) AS c
-       LEFT JOIN (${NET24}) AS n ON n.token = c.token AND n.pool = c.pool
-       INNER JOIN (SELECT pool, venue, verified, token0, token1, created_block, tick_spacing FROM pools FINAL
-         PREWHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)} WHERE ok = 1) AS p ON p.pool = c.pool
-       LEFT JOIN (${OFFICIAL}) AS o ON o.token = c.token
-       WHERE o.token = '' OR c.pool = o.op
-       ORDER BY token, verified DESC, v24 DESC, v DESC LIMIT 1 BY token ${BY_TOKEN}`, { t: choose }),
+    // the main-pool candidates: every pool the token traded in (its all-time volume), and its launchpad's pool
+    !choose.length ? null : Promise.all([
+      rows<{ token: string; pool: string; v: number }>(
+        "SELECT token, pool, sum(volume_usd) AS v FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool", { t: choose }),
+      rows<{ token: string; op: string }>(`SELECT token, op FROM (${OFFICIAL})`, { t: choose })]),
     rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
          uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
@@ -293,8 +316,9 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
   const ingested = Number(tip?.b ?? 0), projected = Number(tip?.pb ?? 0);
   const by = <T extends { token: string }>(xs: T[]) => new Map(xs.map((x) => [x.token, x]));
   const M = by(meta), L = by(launches), T = by(trades), W = by(tops);
+  const cands = await choosePools(choose, cv, vols);
   for (const p of cands) if (!(now / 1000 - (L.get(p.token)?.time ?? 0) < YOUNG_S)) picked.set(p.token, { at: now, p });
-  const P = new Map([...keep.map((k) => [k, picked.get(k)!.p] as const), ...cands.map((p) => [p.token, p] as const)]);
+  const P = new Map([...cached, ...cands.map((p) => [p.token, p] as const)]);
   // per token: the sums over its pools; per main pool: its own (the choice may be cached, its volume isn't)
   const V = new Map<string, Record<string, number>>(), VP = new Map<string, Record<string, number>>();
   for (const { token, pool, ...r } of vols) {
