@@ -3,7 +3,7 @@
 // pools from getImmutables, verified only when Metric's own factory says isPool.
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type Abi } from "viem";
 import { insert, inSpan, rows, span } from "../ch.ts";
-import { METRIC_OMM_FACTORY, MULTICALL3 } from "../chain/constants.ts";
+import { FLAP_CURVE_BEACON, METRIC_OMM_FACTORY, MULTICALL3 } from "../chain/constants.ts";
 import { registryEntries } from "../chain/registry.ts";
 import type { Client } from "../chain/upstream.ts";
 
@@ -23,6 +23,7 @@ const OMM = parseAbi(["struct I { address factory; address token0; address token
 const OMM_FACTORY = parseAbi(["function isPool(address) view returns (bool)"]);
 const INITIALIZE = registryEntries.find((e) => e.key === "univ4:Initialize")!.topic0;
 const RETRY_FAILED_SEC = 3600;
+const BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"; // EIP-1967 beacon
 const V4_PER_TICK = 50;
 
 export type Call = { target: string; abi: Abi; fn: string; args?: unknown[] };
@@ -64,6 +65,12 @@ export async function resolveV23(up: Client, pools: { pool: string; venue: strin
     const byTs = ok.filter((g) => g.venue !== "v2" && !vouched.get(g.pool));
     const ts = await multicall(up, byTs.map((g) => ({ target: g.factory, abi: FACTORY_TS, fn: "getPool", args: [g.token0, g.token1, g.tick_spacing] })));
     byTs.forEach((g, j) => { if (lc(ts[j]) === g.pool) vouched.set(g.pool, true); });
+    // A flap curve has no factory: vouched for by its beacon and its token's own launch (see flapCurves); unvouched it is still
+    // a pool (it trades and gets prices), just unverified, like a fork's.
+    for (const [pool, v] of await flapCurves(up, got.filter((g) => g.venue === "v2" && g.token0 && g.token1 && !g.factory))) {
+      got.find((g) => g.pool === pool)!.factory = FLAP_CURVE_BEACON;
+      vouched.set(pool, v);
+    }
     for (const g of got) {
       if (!vouched.has(g.pool)) { out.push(failed(g.pool, g.venue, g.pool)); continue; }
       out.push({
@@ -74,6 +81,28 @@ export async function resolveV23(up: Client, pools: { pool: string; venue: strin
       });
     }
   }
+  return out;
+}
+
+/** Flap curves among pools that answer token0/token1 but not factory(): those whose EIP-1967 beacon is FLAP_CURVE_BEACON, each
+ *  true when its first swap is in its token's flap launch tx (8,069 of 8,112 measured 2026-11-05; the other 43 had no buy at
+ *  launch). Anyone can deploy a proxy on that beacon, so the beacon alone doesn't vouch: a decoy can't make its first swap be
+ *  in the token's launch tx. */
+export async function flapCurves(up: Pick<Client, "call">, cand: { pool: string; token0: string; token1: string }[]): Promise<Map<string, boolean>> {
+  const out = new Map<string, boolean>();
+  if (!cand.length) return out;
+  const slots = await Promise.all(cand.map((c) => up.call<string>("eth_getStorageAt", [c.pool, BEACON_SLOT, "latest"]).catch(() => "")));
+  const flap = cand.filter((_, j) => ("0x" + (slots[j] ?? "").slice(-40)).toLowerCase() === FLAP_CURVE_BEACON);
+  if (!flap.length) return out;
+  const p = flap.map((c) => c.pool), t = flap.flatMap((c) => [c.token0, c.token1]);
+  const firsts = await rows<{ fp: string; lt: string }>(
+    `SELECT f.pool AS fp, toString(l.token) AS lt
+     FROM (SELECT pool, argMin(tx_hash, (block, log_index)) AS ftx FROM (SELECT pool, tx_hash, block, log_index FROM ev_swaps WHERE pool IN {p:Array(String)}
+       UNION ALL SELECT pool, tx_hash, block, log_index FROM kept_swaps WHERE pool IN {p:Array(String)}) GROUP BY pool) AS f
+     INNER JOIN (SELECT token, tx_hash FROM ev_launches WHERE source = 'flap' AND kind = 'launch' AND token IN {t:Array(String)}
+       UNION ALL SELECT token, tx_hash FROM kept_launches WHERE source = 'flap' AND kind = 'launch' AND token IN {t:Array(String)}) AS l ON l.tx_hash = f.ftx`, { p, t });
+  const ok = new Set(firsts.map((r) => `${r.fp}:${r.lt}`));
+  for (const c of flap) out.set(c.pool, ok.has(`${c.pool}:${c.token0}`) || ok.has(`${c.pool}:${c.token1}`));
   return out;
 }
 

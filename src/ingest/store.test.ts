@@ -98,6 +98,20 @@ test("curve payouts: a rerun writes nothing; a row stored without USD is written
   assert.deepEqual(await rows("SELECT usd FROM curve_payouts FINAL"), [{ usd: 3000 }]);
 });
 
+test("flap curves: vouched only when the pool's first swap is in its token's flap launch tx; another beacon is no flap curve", { skip }, async () => {
+  const { flapCurves } = await import("../projector/pools.ts");
+  const { FLAP_CURVE_BEACON, WETH } = await import("../chain/constants.ts");
+  const A = (c: string) => "0x" + c.repeat(40), H = (c: string) => "0x" + c.repeat(64), time = new Date().toISOString().slice(0, 19).replace("T", " ");
+  const [real, decoy, other, token] = [A("1"), A("2"), A("3"), A("7")];
+  await insert("ev_launches", [{ block: 10, log_index: 0, tx_hash: H("a"), time, token, source: "flap", kind: "launch", keep: 1, sign: 1 }], "t-flap-launch");
+  await insert("ev_swaps", [{ block: 10, log_index: 1, tx_hash: H("a"), time, pool: real, venue: "v2", keep: 1, sign: 1 },
+    { block: 11, log_index: 0, tx_hash: H("b"), time, pool: decoy, venue: "v2", keep: 1, sign: 1 }], "t-flap-swaps");
+  const slot = (p: string) => "0x" + "0".repeat(24) + (p === other ? A("9") : FLAP_CURVE_BEACON).slice(2);
+  const up = { call: async <T,>(_m: string, [p]: unknown[]) => slot(p as string) as T };
+  const got = await flapCurves(up, [real, decoy, other].map((pool) => ({ pool, token0: WETH, token1: token })));
+  assert.deepEqual([...got], [[real, true], [decoy, false]]);
+});
+
 test("contracts: tx and factory creations are created; a reverted one isn't there; one first seen by a log is never first of its kind", { skip }, async () => {
   const { deriveContracts } = await import("../projector/contracts.ts");
   const A = (c: string) => "0x" + c.repeat(40), H = (c: string) => "0x" + c.repeat(64);

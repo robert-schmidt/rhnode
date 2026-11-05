@@ -52,6 +52,9 @@ export const PONS_V2_FACTORY = "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e"; // 
 export const PONS_V1_FACTORY = "0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb"; // "PonsLaunchFactory"
 export const NOXA_FACTORY = "0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb"; // unverified contract, OLI-tagged; same codebase as Pons v1; dormant since 2026-07-11
 export const FLAP_PORTAL = "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09"; // proxy; impl "Portal" verified
+// Flap's per-token bonding curves are BeaconProxies of this beacon (impl 0xf9adbaff5610ffce26855747049c69973a8176e5): token0/token1
+// and a Uniswap-v2-shaped Swap, but no factory() (2026-11-05: 8,120 of the 8,121 v2 pools that failed to resolve in Oct 22–29).
+export const FLAP_CURVE_BEACON = "0x62bae055f7d14eb73e333e6c2d31daac6c2f592e";
 export const HOODFUN_LAUNCHPAD = "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c"; // "HoodCustomLaunchpad"
 
 /** Every launchpad/factory address we know — protocol custody, never a
