@@ -34,14 +34,23 @@ export const workload = new AsyncLocalStorage<string>();
 export async function insert(table: string, values: object[], token: string): Promise<void> {
   if (!values.length) return;
   const w = workload.getStore();
-  await client(w).insert({
-    table,
-    values,
-    format: "JSONEachRow",
-    // async_insert is on by default since ClickHouse 26.x; its path crashes when the token drops every row
-    // ("Invalid partition key size: 0", seen 2026-10-29 on a replayed batch). We batch ourselves, so insert synchronously.
-    clickhouse_settings: { async_insert: 0, insert_deduplication_token: `${table}:${token}`, deduplicate_blocks_in_dependent_materialized_views: 1, ...wl(w) },
-  });
+  // ClickHouse's total memory cap refuses an insert when the server is full (it crashed ingest, 2026-11-05 11:38): the
+  // dedup token makes a retry safe, so wait and retry a few times first
+  for (let k = 1; ; k++) {
+    try {
+      return void await client(w).insert({
+        table,
+        values,
+        format: "JSONEachRow",
+        // async_insert is on by default since ClickHouse 26.x; its path crashes when the token drops every row
+        // ("Invalid partition key size: 0", seen 2026-10-29 on a replayed batch). We batch ourselves, so insert synchronously.
+        clickhouse_settings: { async_insert: 0, insert_deduplication_token: `${table}:${token}`, deduplicate_blocks_in_dependent_materialized_views: 1, ...wl(w) },
+      });
+    } catch (e) {
+      if (k === 4 || (e as { code?: string }).code !== "241") throw e;
+      await new Promise((r) => setTimeout(r, 1_000 * k));
+    }
+  }
 }
 
 export async function rows<T>(query: string, query_params?: Record<string, unknown>): Promise<T[]> {
