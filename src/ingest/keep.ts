@@ -70,16 +70,18 @@ export async function loadCtx(windowSec: number): Promise<KeepCtx> {
     } else or(ctx.watch, w.value, w.bits);
   }
   const since = `now() - INTERVAL ${Math.ceil(windowSec)} SECOND`;
-  const launches = await rows<Launch>(
-    `SELECT kind, token, toUnixTimestamp(time) AS time, detail FROM kept_launches FINAL WHERE kind = 'launch' AND time > ${since} ORDER BY block`,
-  );
+  // no FINAL: learn() keys maps by token/pool, so a not-yet-merged copy is harmless. FINAL merged the month's 2.3M launch
+  // rows for ~2K launches, 571 MiB every 15 s (2026-11-05); without it 1.2 MiB.
+  const launches = (await rows<Omit<Launch, "time"> & { ts: number }>(
+    `SELECT kind, token, toUnixTimestamp(time) AS ts, detail FROM kept_launches WHERE kind = 'launch' AND time > ${since} ORDER BY block`,
+  )).map(({ ts, ...l }) => ({ ...l, time: ts }));
   // Pools of watched tokens come from all of kept_pools (pool creations are always kept).
   const watchedTokens = wl.filter((w) => w.kind === "token" && w.bits & KEEP.WATCH_TOKEN).map((w) => w.value);
-  const pools = await rows<Pool>(
-    `SELECT pool, token0, token1, toUnixTimestamp(time) AS time FROM kept_pools FINAL
+  const pools = (await rows<Omit<Pool, "time"> & { ts: number }>(
+    `SELECT pool, token0, token1, toUnixTimestamp(time) AS ts FROM kept_pools
      WHERE time > ${since} OR token0 IN {t:Array(String)} OR token1 IN {t:Array(String)} ORDER BY block`,
     { t: watchedTokens },
-  );
+  )).map(({ ts, ...p }) => ({ ...p, time: ts }));
   learn(ctx, { ev_launches: launches, ev_pools: pools.filter((p) => p.time > Date.now() / 1000 - windowSec) });
   for (const p of pools) {
     const side = tokenSideOf(p.token0, p.token1);
