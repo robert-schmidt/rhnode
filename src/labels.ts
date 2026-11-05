@@ -4,7 +4,7 @@
 // Ethereum, Base, Arbitrum and BSC (Relay solvers, Layerswap, Gate.io, SideShift, Robinhood's exchange wallets).
 // The promoter's worker labels every hub (an address that sent ETH to or got it from ≥ HUB_PEERS wallets) and every
 // requested wallet, rechecked after 30 days. Pages and the API read labelsOf(), which adds the protocol registry.
-import { ch, rows } from "./ch.ts";
+import { ch, rows, workload } from "./ch.ts";
 import { PROTOCOL } from "./chain/protocol.ts";
 import type { Up } from "./cards.ts";
 
@@ -57,20 +57,26 @@ export async function label(up: Up, addrs: string[]): Promise<number> {
   return out.filter((x) => x.name).length;
 }
 
-/** Hubs and requested wallets not checked in 30 days, every hour. */
+/** Hubs and requested wallets not checked in 30 days, every hour. The hub read merges every sender's and recipient's peers
+ *  state (21M + 15M rows, 4.5 GiB unmerged, after the history pass): hashed it took 1.2-1.6 GiB and failed at ClickHouse's
+ *  cap, retried every minute and starved ingest (2026-11-05 10:27-10:33); in key order on one thread, 180 MB and ~110 s. */
 export async function labelWorker(up: Up): Promise<never> {
+  return workload.run("bulk/slow", () => labelLoop(up)); // the hub read outlasts the 60 s client
+}
+async function labelLoop(up: Up): Promise<never> {
   for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
       const due = (await rows<{ a: string }>(`SELECT a FROM (
           SELECT src AS a FROM agg_native_src GROUP BY src HAVING uniqMerge(peers) >= {p:UInt32}
           UNION DISTINCT SELECT dst AS a FROM agg_native_dst GROUP BY dst HAVING uniqMerge(peers) >= {p:UInt32}
           UNION DISTINCT SELECT wallet AS a FROM ctl_wallet_index FINAL)
-        WHERE a NOT IN (SELECT address FROM labels FINAL WHERE source = 'blockscout' AND checked > now() - INTERVAL 30 DAY)`, { p: HUB_PEERS })).map((r) => r.a);
+        WHERE a NOT IN (SELECT address FROM labels FINAL WHERE source = 'blockscout' AND checked > now() - INTERVAL 30 DAY)
+        SETTINGS optimize_aggregation_in_order = 1, max_threads = 1, max_block_size = 1024`, { p: HUB_PEERS })).map((r) => r.a);
       let named = 0;
       for (let i = 0; i < due.length; i += 200) named += await label(up, due.slice(i, i + 200));
       if (due.length) console.log(`labels: checked ${due.length}, named ${named}`);
       wait = 3_600_000;
-    } catch (e) { console.error("labels:", (e as Error).message); wait = 60_000; } // ingest may not have migrated yet
+    } catch (e) { console.error("labels:", (e as Error).message); wait = 600_000; } // ingest may not have migrated yet
   }
 }
 

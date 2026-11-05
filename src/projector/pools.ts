@@ -85,24 +85,27 @@ export async function resolveV23(up: Client, pools: { pool: string; venue: strin
 }
 
 /** Flap curves among pools that answer token0/token1 but not factory(): those whose EIP-1967 beacon is FLAP_CURVE_BEACON, each
- *  true when its first swap is in its token's flap launch tx (8,069 of 8,112 measured 2026-11-05; the other 43 had no buy at
- *  launch). Anyone can deploy a proxy on that beacon, so the beacon alone doesn't vouch: a decoy can't make its first swap be
- *  in the token's launch tx. */
+ *  true when it swaps in its token's flap launch tx (8,069 of 8,112 measured 2026-11-05; the other 43 had no buy at launch).
+ *  The curve is made in that tx, so such a swap is among its first. Anyone can deploy a proxy on that beacon, so the beacon
+ *  alone doesn't vouch: a decoy can't swap in the token's launch tx. Two reads on the tables' keys (launches by token, swaps
+ *  by pool and block): a first-swap argMin per pool read ~43M rows a call (2026-11-05). */
 export async function flapCurves(up: Pick<Client, "call">, cand: { pool: string; token0: string; token1: string }[]): Promise<Map<string, boolean>> {
   const out = new Map<string, boolean>();
   if (!cand.length) return out;
   const slots = await Promise.all(cand.map((c) => up.call<string>("eth_getStorageAt", [c.pool, BEACON_SLOT, "latest"]).catch(() => "")));
   const flap = cand.filter((_, j) => ("0x" + (slots[j] ?? "").slice(-40)).toLowerCase() === FLAP_CURVE_BEACON);
   if (!flap.length) return out;
-  const p = flap.map((c) => c.pool), t = flap.flatMap((c) => [c.token0, c.token1]);
-  const firsts = await rows<{ fp: string; lt: string }>(
-    `SELECT f.pool AS fp, toString(l.token) AS lt
-     FROM (SELECT pool, argMin(tx_hash, (block, log_index)) AS ftx FROM (SELECT pool, tx_hash, block, log_index FROM ev_swaps WHERE pool IN {p:Array(String)}
-       UNION ALL SELECT pool, tx_hash, block, log_index FROM kept_swaps WHERE pool IN {p:Array(String)}) GROUP BY pool) AS f
-     INNER JOIN (SELECT token, tx_hash FROM ev_launches WHERE source = 'flap' AND kind = 'launch' AND token IN {t:Array(String)}
-       UNION ALL SELECT token, tx_hash FROM kept_launches WHERE source = 'flap' AND kind = 'launch' AND token IN {t:Array(String)}) AS l ON l.tx_hash = f.ftx`, { p, t });
-  const ok = new Set(firsts.map((r) => `${r.fp}:${r.lt}`));
-  for (const c of flap) out.set(c.pool, ok.has(`${c.pool}:${c.token0}`) || ok.has(`${c.pool}:${c.token1}`));
+  const launches = await rows<{ token: string; tx_hash: string; block: string }>(
+    `SELECT token, tx_hash, block FROM ev_launches WHERE token IN {t:Array(String)} AND source = 'flap' AND kind = 'launch'
+     UNION ALL SELECT token, tx_hash, block FROM kept_launches WHERE token IN {t:Array(String)} AND source = 'flap' AND kind = 'launch'`,
+    { t: flap.flatMap((c) => [c.token0, c.token1]) });
+  const swaps = !launches.length ? [] : await rows<{ pool: string; tx_hash: string }>(
+    `SELECT DISTINCT pool, tx_hash FROM (SELECT pool, tx_hash FROM ev_swaps WHERE pool IN {p:Array(String)} AND block IN {b:Array(UInt64)}
+     UNION ALL SELECT pool, tx_hash FROM kept_swaps WHERE pool IN {p:Array(String)} AND block IN {b:Array(UInt64)})`,
+    { p: flap.map((c) => c.pool), b: [...new Set(launches.map((l) => l.block))] });
+  const ok = new Set(swaps.map((s) => `${s.pool}:${s.tx_hash}`)), launchTx = new Map<string, string[]>();
+  for (const l of launches) (launchTx.get(l.token) ?? launchTx.set(l.token, []).get(l.token)!).push(l.tx_hash);
+  for (const c of flap) out.set(c.pool, [c.token0, c.token1].some((t) => (launchTx.get(t) ?? []).some((h) => ok.has(`${c.pool}:${h}`))));
   return out;
 }
 
