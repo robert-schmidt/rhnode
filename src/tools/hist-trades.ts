@@ -60,7 +60,7 @@ export async function loadBridges(tokens: string[], from: number, to: number, de
        GROUP BY token, pool, m HAVING v >= 100 AND c < 1e12`, { from, to, t: tokens.slice(i, i + 1_000), w: WETH, n: NATIVE_ETH, u: USDG });
     const ver = new Set<string>(), cp = [...new Set(cs.map((c) => c.pool))];
     for (let j = 0; j < cp.length; j += 1_000)
-      for (const r of await rows<{ pool: string }>("SELECT pool FROM pools FINAL WHERE verified = 1 AND pool IN {p:Array(String)}", { p: cp.slice(j, j + 1_000) })) ver.add(r.pool);
+      for (const r of await rows<{ pool: string }>("SELECT pool FROM pools FINAL PREWHERE pool IN {p:Array(String)} WHERE verified = 1", { p: cp.slice(j, j + 1_000) })) ver.add(r.pool);
     const best = new Map<string, { c: number; v: number }>();
     for (const c of cs) {
       if (!ver.has(c.pool) || !(Number(c.c) > 0)) continue;
@@ -117,7 +117,7 @@ async function main(from: number, to: number) {
   const v23 = pv.filter((r) => !known.has(r.pool) && (r.venue === "v2" || r.venue === "v3"));
   if (v23.length && !DRY) await insert("pools", await resolveV23(upstream(cfg.upstreamHttp), v23), `hist-trades-pools:${from}-${to}`);
   for (let i = 0; i < ps.length; i += 1_000)
-    for (const r of await rows<Pool & { pool: string }>("SELECT pool, token0, token1, verified FROM pools FINAL WHERE ok = 1 AND pool IN {p:Array(String)}", { p: ps.slice(i, i + 1_000) }))
+    for (const r of await rows<Pool & { pool: string }>("SELECT pool, token0, token1, verified FROM pools FINAL PREWHERE pool IN {p:Array(String)} WHERE ok = 1", { p: ps.slice(i, i + 1_000) }))
       pools.set(r.pool, { token0: r.token0, token1: r.token1, verified: Number(r.verified) });
   const decimals = new Map<string, number>(Object.entries(QUOTE_DECIMALS));
   const ts = [...new Set([...pools.values()].flatMap((x) => [x.token0, x.token1]))].filter((t) => !decimals.has(t));

@@ -115,8 +115,8 @@ async function priceRange(from: number, to: number, o: Only | undefined, fixedEt
   const swaps = await rows<Swap & { block: string; tx_index: number; log_index: number; tx_hash: string; time: string; pool: string; tx_from: string; verified: number }>(
     `SELECT s.block, s.tx_index, s.log_index, s.tx_hash, s.time, s.venue, s.pool, toString(s.amount0) AS a0, toString(s.amount1) AS a1,
        toString(s.sqrt_price_x96) AS sqrt, s.tx_from, p.token0, p.token1, p.verified
-     FROM ev_swaps AS s INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL WHERE ok = 1
-       AND pool IN (SELECT pool FROM ev_swaps WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only})) AS p USING pool
+     FROM ev_swaps AS s INNER JOIN (SELECT pool, token0, token1, verified FROM pools FINAL
+       PREWHERE pool IN (SELECT pool FROM ev_swaps WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} ${only}) WHERE ok = 1) AS p USING pool
      WHERE s.block > {from:UInt64} AND s.block <= {to:UInt64} AND ${inSpan("s.time")} AND s.sign = 1 ${only.replace("venue", "s.venue")} ORDER BY s.block, s.log_index`,
     { from, to, ...await span(from, to), ...(o ? { only_pools: o.pools ?? [] } : {}) },
   );

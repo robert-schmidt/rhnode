@@ -160,7 +160,7 @@ export async function resolvePools(up: Client, lookup: Client, from: number, to:
        WHERE block > {from:UInt64} AND block <= {to:UInt64} AND ${inSpan()} AND venue != 'curve' -- a curve's row comes from its launch (migration 021)
          ${only ? "AND pool IN {only:Array(String)}" : ""} GROUP BY pool)
      SELECT pool, vn, manager FROM seen
-     WHERE pool NOT IN (SELECT pool FROM pools FINAL WHERE pool IN (SELECT pool FROM seen) AND (verified = 1 OR version > {retry:UInt64}))`,
+     WHERE pool NOT IN (SELECT pool FROM pools FINAL PREWHERE pool IN (SELECT pool FROM seen) WHERE verified = 1 OR version > {retry:UInt64})`,
     { from, to, ...await span(from, to), retry: Date.now() - RETRY_FAILED_SEC * 1000, ...(only ? { only } : {}) },
   )).map(({ vn, ...u }) => ({ ...u, venue: vn }));
   const v23 = await resolveV23(up, unknown.filter((u) => u.venue === "v2" || u.venue === "v3"));

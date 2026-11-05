@@ -187,9 +187,10 @@ async function markets(up: Up): Promise<number> {
   const [tape, pr, lps] = await Promise.all([
     rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND sign = 1${SINCE} ORDER BY token, block, log_index LIMIT 500 BY token${LEAN}`, { t, t0 }),
     rows<{ pool: string; vn: string; cb: string; hooks: string; token0: string; token1: string }>(
-      // the tokens' pools found unmerged first, then FINAL by key: FINAL over all 2.5M pools was 546 MiB, this 219 (2026-11-05)
+      // the tokens' pools found unmerged first, then FINAL by key, the key filter in PREWHERE so it runs before the merge (pools
+      // has ~314 granules: any 1,000 keys touch nearly all; WHERE merged all 2.5M rows first: 249 MiB vs 42, 2026-11-05)
       `SELECT pool, toString(venue) AS vn, created_block AS cb, hooks, token0, token1 FROM pools FINAL
-       WHERE pool IN (SELECT pool FROM pools WHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}) AND ok = 1`, { t }),
+       PREWHERE pool IN (SELECT pool FROM pools WHERE token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}) WHERE ok = 1`, { t }),
     rows<{ pool: string }>("SELECT pool FROM pools WHERE pool IN {t:Array(String)}", { t }),
   ]);
   const T = byToken(tape), P = new Map<string, PoolRow[]>(), lp = new Set(lps.map((r) => r.pool)), skip = await infraSet();

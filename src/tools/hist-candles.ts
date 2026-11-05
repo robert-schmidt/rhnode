@@ -93,7 +93,7 @@ async function main(fromDate: string) {
       swaps += buf.length; priced += out.length; buf = [];
     };
     const pools = new Map((await rows<PoolRow>(
-      "SELECT pool, token0, token1, verified FROM pools FINAL WHERE pool LIKE {like:String} AND ok = 1", { like: `${pre}%` })).map((p) => [p.pool, p]));
+      "SELECT pool, token0, token1, verified FROM pools FINAL PREWHERE pool LIKE {like:String} WHERE ok = 1", { like: `${pre}%` })).map((p) => [p.pool, p]));
     const rs = await long.query({
       query: `SELECT ${SWAP_COLS} FROM kept_swaps AS s FINAL
         WHERE s.pool LIKE {like:String} AND s.time >= toDateTime({from:UInt32}) AND s.block < {g:UInt64} AND s.sign = 1
@@ -128,7 +128,7 @@ async function missing(fromDate: string, fix = false) {
   const want = traded.map((x) => x.pool).filter((x) => !candled.has(x));
   const pools = new Map<string, PoolRow>();
   for (let i = 0; i < want.length; i += 1_000)
-    for (const p of await rows<PoolRow>("SELECT pool, token0, token1, verified FROM pools FINAL WHERE ok = 1 AND pool IN {p:Array(String)}", { p: want.slice(i, i + 1_000) }))
+    for (const p of await rows<PoolRow>("SELECT pool, token0, token1, verified FROM pools FINAL PREWHERE pool IN {p:Array(String)} WHERE ok = 1", { p: want.slice(i, i + 1_000) }))
       if (!(p.token0 in QUOTE_DECIMALS && p.token1 in QUOTE_DECIMALS)) pools.set(p.pool, p);
   const decimals = new Map<string, number>(Object.entries(QUOTE_DECIMALS));
   const toks = [...new Set([...pools.values()].flatMap((p) => [p.token0, p.token1]))].filter((t) => !decimals.has(t));
