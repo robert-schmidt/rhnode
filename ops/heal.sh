@@ -36,6 +36,14 @@ why=""
 [ $((now - $(cat $S/moved))) -ge 600 ] && why="head stuck at $head for $(( (now - $(cat $S/moved)) / 60 )) min"
 [ "${mem:-0}" -ge 85 ] && why="memory at ${mem}% of its cap"
 [ "$avail" -lt 3000 ] && why="${avail} MB available on the box (nitro at ${mem}%)"
+# 85% comes every few hours (its caches outgrow it), sometimes in a chain burst, and then Nitro can't catch up
+# (2026-11-05 05:50: only capping ClickHouse let it). So from 75% it restarts early, at a good moment: at the tip and
+# the chain quiet (under 60 Ggas/h over 10 min, against ~25 quiet and 100-250 in a burst). 85% stays the hard limit.
+if [ -z "$why" ] && [ "${mem:-0}" -ge 75 ]; then
+  tip=$(curl -s -m 10 -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' https://rpc.mainnet.chain.robinhood.com | grep -oE '0x[0-9a-f]+')
+  gas=$(docker compose exec -T clickhouse clickhouse-client -q "SELECT toUInt32(sum(gas_used) / 1e9 * 6) FROM rhnode.raw_txs WHERE time > now() - 600" 2>/dev/null)
+  [ -n "$tip" ] && [ $(( $tip - head )) -lt 50 ] && [ "${gas:-999}" -lt 60 ] && why="memory at ${mem}%, at the tip, chain quiet (${gas} Ggas/h)"
+fi
 [ -z "$why" ] && exit 0
 recent=$(awk -v t=$((now - 21600)) '$1 > t' $S/restarts 2>/dev/null | wc -l)
 last=$(tail -1 $S/restarts 2>/dev/null | cut -d' ' -f1)
