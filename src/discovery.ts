@@ -33,6 +33,7 @@ import type { Up } from "./cards.ts";
 
 const PAR = Number(process.env.DISCOVERY_PAR ?? 8);
 const REST = Number(process.env.DISCOVERY_REST ?? 4);
+const ORIGINS_BATCH = Number(process.env.DISCOVERY_ORIGINS_BATCH ?? 1000);
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"; // EIP-1967 implementation
 const BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50"; // EIP-1967 beacon
 const IMPLEMENTATION = "0x5c60da1b"; // implementation()
@@ -138,10 +139,10 @@ async function infraSet(): Promise<Set<string>> {
   return infra.set;
 }
 
-async function origins(up: Up): Promise<number> {
+async function origins(up: Up, n: number): Promise<number> {
   const due = await rows<Record<string, unknown> & { token: string; tx_hash: string; v: string }>(
     `SELECT token, block, tx_index, log_index, tx_hash, time, mint_recipient, toString(amount) AS amt, toString(version) AS v
-     FROM token_origin FINAL WHERE checked = 0 ORDER BY block DESC LIMIT 200`);
+     FROM token_origin FINAL WHERE checked = 0 ORDER BY block DESC LIMIT {n:UInt32}`, { n });
   if (!due.length) return 0;
   const traced = new Map((await rows<{ created: string; creator: string }>(
     "SELECT created, creator FROM creations FINAL WHERE created IN {t:Array(String)}", { t: due.map((d) => d.token) })).map((r) => [r.created, r.creator]));
@@ -300,13 +301,21 @@ async function payouts(): Promise<number> {
 }
 
 export async function discoveryWorker(up: Up): Promise<never> {
-  return workload.run("bulk/slow", () => discoveryLoop(up)); // its reads are heavy and nobody waits on them
+  return workload.run("bulk/slow", () => Promise.race([discoveryLoop(up), originsLoop(up)])); // its reads are heavy and nobody waits on them
+}
+// origins in a loop of its own: in the main round it waited on markets' tape reads (~30 s each, 2026-11-05) and checked
+// 200 tokens a minute, ~7 days for the 2M tokens the history pass found. Its own read is ~1 s; the rest is 2 calls a token.
+async function originsLoop(up: Up): Promise<never> {
+  for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
+    try { wait = await origins(up, ORIGINS_BATCH) ? 1_000 : 60_000; }
+    catch (e) { console.error("discovery origins:", (e as Error).message); wait = 60_000; }
+  }
 }
 
 async function discoveryLoop(up: Up): Promise<never> {
   for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
-      const t0 = Date.now(), n = await creations(up) + await origins(up) + await markets(up) + await payouts();
+      const t0 = Date.now(), n = await creations(up) + await markets(up) + await payouts();
       const [w] = await rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'walk'");
       wait = !n ? 60_000 : Number(w?.b ?? 0) > 0 ? Math.max(1_000, REST * (Date.now() - t0)) : 1_000;
     } catch (e) { console.error("discovery:", (e as Error).message); wait = 60_000; } // ingest may not have migrated yet
