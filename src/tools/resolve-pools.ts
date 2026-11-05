@@ -17,7 +17,12 @@ async function main(): Promise<void> {
   const up = upstream(cfg.upstreamHttp);
   let ok = 0, verified = 0;
   for (let i = 0; i < pv.length; i += 1_000) {
-    const got = await resolveV23(up, pv.slice(i, i + 1_000));
+    // ClickHouse's total cap (~5.6 GiB) kills the biggest query when the box is busy (twice on 2026-11-05): wait, retry
+    let got: Awaited<ReturnType<typeof resolveV23>> | null = null;
+    for (let k = 1; !got; k++) {
+      try { got = await resolveV23(up, pv.slice(i, i + 1_000)); }
+      catch (e) { if (k === 5 || (e as { code?: string }).code !== "241") throw e; console.error(`memory cap at ${i}, retry ${k} in 30 s`); await new Promise((r) => setTimeout(r, 30_000)); }
+    }
     ok += got.filter((r) => r.ok).length;
     verified += got.filter((r) => r.verified).length;
     if (!DRY) await insert("pools", got, `resolve-pools:${from}-${to}:${i}:${Date.now()}`);
