@@ -83,7 +83,7 @@ export async function projectTokens(up: Client, dirty: string[], to: number, tag
          toString(arraySum(x -> toUInt256(x), arraySlice(arrayReverseSort(groupArrayIf(b, b > 0 AND holder != {zero:String})), 1, 10))) AS top10,
          toString(-sumIf(b, holder = {zero:String})) AS minted
        FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances WHERE token IN {t:Array(String)} GROUP BY token, holder)
-       GROUP BY token`,
+       GROUP BY token SETTINGS optimize_aggregation_in_order = 1`, // in key order: a chunk with the big tokens 1.25 GiB → 501 MiB (2026-11-05)
       { t: chunk, zero: ZERO },
     );
     // A token whose every balance went back to 0 has no agg_balances rows left (SummingMergeTree drops zero sums), so it
