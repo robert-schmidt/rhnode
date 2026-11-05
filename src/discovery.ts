@@ -173,16 +173,19 @@ const LEAN = " SETTINGS do_not_merge_across_partitions_select_final = 1, max_thr
 
 async function markets(up: Up): Promise<number> {
   const [tip] = await rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'tip'");
-  const due = await rows<{ token: string; block: string; tx_hash: string; minter: string }>(
-    `SELECT o.token AS token, o.block AS block, o.tx_hash AS tx_hash, o.minter AS minter FROM token_origin AS o FINAL
+  const due = await rows<{ token: string; block: string; tx_hash: string; minter: string; ts: number }>(
+    `SELECT o.token AS token, o.block AS block, o.tx_hash AS tx_hash, o.minter AS minter, toUnixTimestamp(o.time) AS ts FROM token_origin AS o FINAL
      LEFT JOIN (SELECT token, final, version FROM token_markets FINAL) AS m ON m.token = o.token
      WHERE o.checked = 1 AND o.minter != '' AND (m.version = 0 OR (m.final = 0
        AND m.version < {now:UInt64} - if(o.block + {week:UInt64} > {tip:UInt64}, 3600000, 86400000)))
      ORDER BY o.block DESC LIMIT 100`, { now: Date.now(), week: WEEK, tip: Number(tip.b) });
   if (!due.length) return 0;
-  const t = due.map((d) => d.token);
+  const t = due.map((d) => d.token), t0 = Math.min(...due.map((d) => Number(d.ts))) - 86_400; // a day early: a token may move before its first Transfer from 0
+  // no transfer before its mint: the bound prunes older months. 100 young tokens' tapes: 54M rows, 381 MiB, 32 s without
+  // it, 0.7M rows, 35 MiB, 0.5 s with it (kept_transfers from genesis since the history pass, 2026-11-05)
+  const SINCE = " AND time >= toDateTime({t0:UInt32})";
   const [tape, pr, lps] = await Promise.all([
-    rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND sign = 1 ORDER BY token, block, log_index LIMIT 500 BY token${LEAN}`, { t }),
+    rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND sign = 1${SINCE} ORDER BY token, block, log_index LIMIT 500 BY token${LEAN}`, { t, t0 }),
     rows<{ pool: string; vn: string; cb: string; hooks: string; token0: string; token1: string }>(
       `SELECT pool, toString(venue) AS vn, created_block AS cb, hooks, token0, token1 FROM pools FINAL
        WHERE ok = 1 AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})`, { t }),
@@ -200,11 +203,11 @@ async function markets(up: Up): Promise<number> {
     if (code && code !== "0x" && !code.startsWith("0xef0100")) curve.set(d.token, c); // a wallet (or an EIP-7702 one) is no curve
   });
   const ct = [...curve.keys()], cs = [...new Set(curve.values())];
-  const F = ct.length ? byToken((await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND (\`from\` IN {c:Array(String)} OR \`to\` IN {c:Array(String)}) AND sign = 1
-    ORDER BY token, block, log_index LIMIT 100000 BY token${LEAN}`, { t: ct, c: cs })).filter((r) => r.from === curve.get(r.token) || r.to === curve.get(r.token))) : new Map();
+  const F = ct.length ? byToken((await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND (\`from\` IN {c:Array(String)} OR \`to\` IN {c:Array(String)}) AND sign = 1${SINCE}
+    ORDER BY token, block, log_index LIMIT 100000 BY token${LEAN}`, { t: ct, c: cs, t0 })).filter((r) => r.from === curve.get(r.token) || r.to === curve.get(r.token))) : new Map();
   const empty = new Map(ct.map((k) => [k, emptiedAt(curve.get(k)!, F.get(k) ?? [])] as const).filter(([, e]) => e));
-  const G = empty.size ? (await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND tx_hash IN {h:Array(String)} AND sign = 1 ORDER BY block, log_index${LEAN}`,
-    { t: [...empty.keys()], h: [...empty.values()].map((e) => e!.tx_hash) })) : [];
+  const G = empty.size ? (await rows<Row>(`${TF} WHERE token IN {t:Array(String)} AND tx_hash IN {h:Array(String)} AND sign = 1${SINCE} ORDER BY block, log_index${LEAN}`,
+    { t: [...empty.keys()], h: [...empty.values()].map((e) => e!.tx_hash), t0 })) : [];
   const out = due.map((d) => {
     const c = curve.get(d.token) ?? "", g = c ? graduationOf(c, F.get(d.token) ?? [], new Map([[empty.get(d.token)?.tx_hash ?? "", G.filter((r) => r.token === d.token).map(tr)]]), P.get(d.token) ?? []) : null;
     return { token: d.token, minter: d.minter, curve: c, grad_block: g?.block ?? 0, grad_tx: g?.tx ?? "", pool: g?.pool ?? "", venue: g?.venue ?? "",

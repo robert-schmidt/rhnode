@@ -2,6 +2,7 @@
 // emitter's own word: v2/v3 answers are checked against the factory, v4 pools come from their Initialize log, Metric OMM
 // pools from getImmutables, verified only when Metric's own factory says isPool.
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type Abi } from "viem";
+import { TupleParam } from "@clickhouse/client";
 import { insert, inSpan, rows, span } from "../ch.ts";
 import { FLAP_CURVE_BEACON, METRIC_OMM_FACTORY, MULTICALL3 } from "../chain/constants.ts";
 import { registryEntries } from "../chain/registry.ts";
@@ -99,13 +100,15 @@ export async function flapCurves(up: Pick<Client, "call">, cand: { pool: string;
     `SELECT token, tx_hash, block FROM ev_launches WHERE token IN {t:Array(String)} AND source = 'flap' AND kind = 'launch'
      UNION ALL SELECT token, tx_hash, block FROM kept_launches WHERE token IN {t:Array(String)} AND source = 'flap' AND kind = 'launch'`,
     { t: flap.flatMap((c) => [c.token0, c.token1]) });
-  const swaps = !launches.length ? [] : await rows<{ pool: string; tx_hash: string }>(
-    `SELECT DISTINCT pool, tx_hash FROM (SELECT pool, tx_hash FROM ev_swaps WHERE pool IN {p:Array(String)} AND block IN {b:Array(UInt64)}
-     UNION ALL SELECT pool, tx_hash FROM kept_swaps WHERE pool IN {p:Array(String)} AND block IN {b:Array(UInt64)})`,
-    { p: flap.map((c) => c.pool), b: [...new Set(launches.map((l) => l.block))] });
-  const ok = new Set(swaps.map((s) => `${s.pool}:${s.tx_hash}`)), launchTx = new Map<string, string[]>();
-  for (const l of launches) (launchTx.get(l.token) ?? launchTx.set(l.token, []).get(l.token)!).push(l.tx_hash);
-  for (const c of flap) out.set(c.pool, [c.token0, c.token1].some((t) => (launchTx.get(t) ?? []).some((h) => ok.has(`${c.pool}:${h}`))));
+  const launchTx = new Map<string, { tx_hash: string; block: string }[]>();
+  for (const l of launches) (launchTx.get(l.token) ?? launchTx.set(l.token, []).get(l.token)!).push(l);
+  // (pool, launch block) pairs: one granule per part each (1,000 curves: 16.9M rows, not 26M for pool IN + block IN)
+  const pb = flap.flatMap((c) => [c.token0, c.token1].flatMap((t) => (launchTx.get(t) ?? []).map((l) => new TupleParam([c.pool, Number(l.block)]))));
+  const swaps = !pb.length ? [] : await rows<{ pool: string; tx_hash: string }>(
+    `SELECT DISTINCT pool, tx_hash FROM (SELECT pool, tx_hash FROM ev_swaps WHERE (pool, block) IN {pb:Array(Tuple(String, UInt64))}
+     UNION ALL SELECT pool, tx_hash FROM kept_swaps WHERE (pool, block) IN {pb:Array(Tuple(String, UInt64))})`, { pb });
+  const ok = new Set(swaps.map((s) => `${s.pool}:${s.tx_hash}`));
+  for (const c of flap) out.set(c.pool, [c.token0, c.token1].some((t) => (launchTx.get(t) ?? []).some((l) => ok.has(`${c.pool}:${l.tx_hash}`))));
   return out;
 }
 
