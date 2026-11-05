@@ -12,7 +12,11 @@ const clients = new Map<string, typeof ch>();
 const client = (w: string | undefined) => {
   if (!w) return ch;
   let c = clients.get(w);
-  if (!c) clients.set(w, c = createClient({ ...cfg.clickhouse, request_timeout: 60_000, keep_alive: { idle_socket_ttl: 8000 } }));
+  // a ".../slow" lane is for jobs nobody waits on (discovery): its reads may take minutes while the history pass shares the box,
+  // and at 60 s the client gave up and ClickHouse threw the work away (56M rows every round, 2026-11-05 08:09-08:23)
+  const slow = w.endsWith("/slow");
+  if (!c) clients.set(w, c = createClient({ ...cfg.clickhouse, request_timeout: slow ? 600_000 : 60_000, keep_alive: { idle_socket_ttl: 8000 },
+    ...(slow ? { clickhouse_settings: { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: "10000" } } : {}) })); // headers keep the socket alive
   return c;
 };
 // "apps_heavy/pools": ClickHouse workload apps_heavy, its own sockets (the lane after "/"). One client's pool-report sweeps held all

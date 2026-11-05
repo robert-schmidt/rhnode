@@ -300,7 +300,7 @@ async function payouts(): Promise<number> {
 }
 
 export async function discoveryWorker(up: Up): Promise<never> {
-  return workload.run("bulk", () => discoveryLoop(up)); // its reads are heavy and nobody waits on them
+  return workload.run("bulk/slow", () => discoveryLoop(up)); // its reads are heavy and nobody waits on them
 }
 
 async function discoveryLoop(up: Up): Promise<never> {
