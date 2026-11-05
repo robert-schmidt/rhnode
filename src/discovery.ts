@@ -287,7 +287,8 @@ async function payouts(): Promise<number> {
   // week 41.5M, 15 s; the same 100 unbounded 81M, 67 s (2026-11-05)
   const fresh = await rows<{ c: string; v: string; t: string }>(`SELECT m.curve AS c, max(m.version) AS v, toString(greatest(min(o.time), toDateTime(3600)) - INTERVAL 1 HOUR) AS t
     FROM (SELECT token, curve, version FROM token_markets FINAL WHERE curve != '' AND version > {since:UInt64}) AS m
-    LEFT JOIN (SELECT token, time FROM token_origin FINAL) AS o ON o.token = m.token GROUP BY c ORDER BY v LIMIT ${BATCH} WITH TIES`, { since });
+    LEFT JOIN (SELECT token, time FROM token_origin FINAL WHERE token IN (SELECT token FROM token_markets FINAL WHERE curve != '' AND version > {since:UInt64})) AS o
+    ON o.token = m.token GROUP BY c ORDER BY v LIMIT ${BATCH} WITH TIES`, { since }); // only these tokens' origins: 133 MiB, not 629 (2026-11-05)
   if (fresh.length) {
     const floor = fresh.map((r) => r.t).sort()[0]; // no origin row is 1970 (all); ponytail: one floor per batch, the oldest token's; per-month batches if mixed ages cost too much
     await slow.command({ query: ERC20_PAYOUTS(OF_CURVES), query_params: { q, c: fresh.map((r) => r.c), lo: 0, hi: FAR, t0: floor }, clickhouse_settings: { workload: "bulk" } });
