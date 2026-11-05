@@ -15,8 +15,9 @@
 //   others are looked at again hourly (daily after a week).
 // - curve_payouts (migration 025): native ETH out of a curve from tip traces, LAG blocks behind them (a new token's
 //   curve is found within the hour of its first trades, so its payouts are scanned after it is known); ERC-20 quotes
-//   out of a curve from kept_transfers, hourly (it reaches back with the history pass): only rows not stored yet, or
-//   stored without a USD value that has one now (pre-go-live prices come later), so a rerun writes nothing.
+//   out of a curve from kept_transfers, block range by range at the same lag, and all of a curve's rows by address when
+//   it is found later (an old token, once the history pass reaches its mint): only rows not stored yet, or stored
+//   without a USD value that has one now (pre-go-live prices come later), so a rerun writes nothing.
 // Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass: while the pass
 // runs, it rests DISCOVERY_REST times as long as a round took (each token read touches a granule in every kept_transfers
 // part, ~260K rows whatever its size: measured 2026-10-31, unthrottled it cut the pass from ~800 to ~250 inserts per 5 min).
@@ -226,37 +227,74 @@ export const NATIVE_PAYOUTS = `INSERT INTO curve_payouts
     if(e.eu > 0, toFloat64(t.value) / 1e18 * e.eu, NULL) AS u, (t.tx_hash, t.from) IN ${SELLS("AND time >= {t0:DateTime}")} AS sl, 'trace' AS src
   FROM raw_traces AS t LEFT JOIN ${EU("AND time >= {t0:DateTime}")} AS e ON e.h = toStartOfHour(t.time)
   WHERE t.block > {lo:UInt64} AND t.block <= {hi:UInt64} AND t.value > 0 AND t.error = '' AND t.from IN ${CURVES}`;
-export const ERC20_PAYOUTS = `INSERT INTO curve_payouts
+// ERC-20 quotes out of the curves {c} in rows k (kept_transfers' shape): priced when the hour has a price, a row stored
+// before without one is written again once it has one, so a rerun writes nothing.
+export const ERC20_PAYOUTS = (k: string) => `INSERT INTO curve_payouts
   SELECT k.from AS c, k.block AS b, k.tx_index AS ti, k.log_index AS ix, k.tx_hash AS th, k.time AS tm, toString(k.token) AS a, toString(k.to) AS r, k.amount AS v,
     multiIf(k.token = '${USDG}', toFloat64(k.amount) / 1e6, k.token = '${WETH}' AND e.eu > 0, toFloat64(k.amount) / 1e18 * e.eu,
-      p.pu > 0, toFloat64(k.amount) / pow(10, d.dc) * p.pu, NULL) AS u, (k.tx_hash, k.from) IN ${SELLS("")} AS sl, 'transfer' AS src
-  FROM (SELECT * FROM kept_transfers WHERE sign = 1 AND \`from\` IN ${CURVES} AND (token IN ('${WETH}', '${USDG}') OR token IN
-    (SELECT toFixedString(JSONExtractString(detail, 'pairToken'), 42) FROM kept_launches WHERE kind = 'launch' AND JSONExtractString(detail, 'pairToken') NOT IN ('', '${NATIVE_ETH}') GROUP BY 1))) AS k
-  LEFT JOIN ${EU("")} AS e ON e.h = toStartOfHour(k.time)
-  LEFT JOIN (SELECT token AS pt, toStartOfHour(time) AS h, avg(price_usd) AS pu FROM ev_prices WHERE quote IN ${ANCHORS} AND verified = 1 AND usd >= 100
-    GROUP BY pt, h) AS p ON p.pt = k.token AND p.h = toStartOfHour(k.time)
-  LEFT JOIN (SELECT token AS dt, decimals AS dc FROM serve_tokens FINAL) AS d ON d.dt = k.token
+      p.pu > 0, toFloat64(k.amount) / pow(10, d.dc) * p.pu, NULL) AS u,
+    (k.tx_hash, k.from) IN (SELECT tx_hash, \`to\` FROM kept_transfers WHERE token IN (SELECT token FROM token_markets FINAL WHERE curve IN {c:Array(String)})
+      AND (token, \`to\`) IN ${OWN} AND block > {lo:UInt64} AND block <= {hi:UInt64} AND time >= {t0:DateTime}) AS sl, 'transfer' AS src
+  FROM (${k}) AS k
+  LEFT JOIN ${EU("AND time >= {t0:DateTime}")} AS e ON e.h = toStartOfHour(k.time)
+  LEFT JOIN (SELECT token AS pt, toStartOfHour(time) AS h, avg(price_usd) AS pu FROM ev_prices WHERE token IN {q:Array(String)} AND quote IN ${ANCHORS}
+    AND verified = 1 AND usd >= 100 AND time >= {t0:DateTime} GROUP BY pt, h) AS p ON p.pt = k.token AND p.h = toStartOfHour(k.time)
+  LEFT JOIN (SELECT token AS dt, decimals AS dc FROM serve_tokens FINAL WHERE token IN {q:Array(String)}) AS d ON d.dt = k.token
   WHERE (k.token, k.from) NOT IN ${OWN}
-    AND (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts WHERE source = 'transfer' AND usd IS NOT NULL)
-    AND (u IS NOT NULL OR (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts WHERE source = 'transfer'))`;
-
-let erc20At = 0;
-// The ERC-20 step reads ~800M rows (115–141 s on the busy box, 2026-11-01): the shared client gave up at 60 s while
-// ClickHouse finished the insert anyway, and as the step only counted as done on success it ran again every round
-// (~3 min). Its own client waits 10 min, and it's tried hourly whether or not the last try worked.
+    AND (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts
+      WHERE source = 'transfer' AND usd IS NOT NULL AND curve IN {c:Array(String)} AND block > {lo:UInt64} AND block <= {hi:UInt64})
+    AND (u IS NOT NULL OR (k.from, k.block, k.tx_index, k.log_index) NOT IN (SELECT curve, block, tx_index, idx FROM curve_payouts
+      WHERE source = 'transfer' AND curve IN {c:Array(String)} AND block > {lo:UInt64} AND block <= {hi:UInt64}))`;
+// new blocks: kept_transfers by token (the quotes) and block, so a step reads only its range
+export const IN_RANGE = "SELECT * FROM kept_transfers WHERE sign = 1 AND `from` IN {c:Array(String)} AND token IN {q:Array(String)} AND block > {lo:UInt64} AND block <= {hi:UInt64} AND time >= {t0:DateTime}";
+export const RANGE_CURVES = `SELECT DISTINCT toString(\`from\`) AS c FROM kept_transfers WHERE sign = 1 AND \`from\` IN ${CURVES} AND token IN {q:Array(String)}
+  AND block > {lo:UInt64} AND block <= {hi:UInt64} AND time >= {t0:DateTime}`;
+// a curve found after its blocks were read (an old token, once the history pass reaches its mint): all of its rows, by address
+export const OF_CURVES = "SELECT * EXCEPT (wallet) FROM kept_transfers_by_wallet WHERE wallet IN {c:Array(String)} AND `from` = wallet AND sign = 1 AND token IN {q:Array(String)} AND time >= {t0:DateTime}";
+const QUOTES = `SELECT DISTINCT toString(toFixedString(JSONExtractString(detail, 'pairToken'), 42)) AS q FROM kept_launches
+  WHERE kind = 'launch' AND JSONExtractString(detail, 'pairToken') NOT IN ('', '${NATIVE_ETH}')`;
+// Until 2026-11-05 the ERC-20 step was one hourly read of every quote transfer out of every curve: 1.56B rows, 316 s
+// (query_log 02:24), and it starved Nitro at the 18 W power cap. Now each block range is read once, ERC20_STEP at a time
+// (10K blocks: 2.8M rows, 1.3 s, 2026-11-05; the fixed cost is a granule per quote token and part, so not every round),
+// and a newly found curve is read by address from the by-wallet copy.
+const ERC20_STEP = 10_000, ERC20_MAX = 50_000, BATCH = 100, FAR = Number.MAX_SAFE_INTEGER;
+let quotes = { at: 0, q: [] as string[] };
+// a busy curve's whole history can outlast the shared client's 60 s; ClickHouse finishes an insert the client gave up on
 const slow = createClient({ ...cfg.clickhouse, request_timeout: 600_000,
   clickhouse_settings: { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: "10000" } }); // headers keep the socket alive
 async function payouts(): Promise<number> {
-  const [c] = await rows<{ p: string; t: string }>("SELECT maxIf(block, name = 'payouts') AS p, maxIf(block, name = 'trace') AS t FROM ctl_cursors FINAL WHERE name IN ('payouts', 'trace')");
+  const [c] = await rows<{ p: string; t: string; e: string; m: string }>(`SELECT maxIf(block, name = 'payouts') AS p, maxIf(block, name = 'trace') AS t,
+    maxIf(block, name = 'payouts_erc20') AS e, maxIf(block, name = 'payouts_markets') AS m FROM ctl_cursors FINAL WHERE name IN ('payouts', 'trace', 'payouts_erc20', 'payouts_markets')`);
+  const t0 = async (b: number) => (await rows<{ t: string }>("SELECT toString(time - INTERVAL 1 HOUR) AS t FROM raw_blocks WHERE number = {b:UInt64}", { b }))[0]?.t ?? "2026-10-31 00:00:00";
   const lo = Math.max(Number(c.p), TRACE_START - 1), hi = Math.min(Number(c.t) - LAG, lo + NATIVE_STEP);
   let n = 0;
   if (hi > lo) {
-    const [b] = await rows<{ t: string }>("SELECT toString(time - INTERVAL 1 HOUR) AS t FROM raw_blocks WHERE number = {b:UInt64}", { b: lo + 1 });
-    await ch.command({ query: NATIVE_PAYOUTS, query_params: { lo, hi, t0: b?.t ?? "2026-10-31 00:00:00" }, clickhouse_settings: { workload: "bulk" } });
+    await ch.command({ query: NATIVE_PAYOUTS, query_params: { lo, hi, t0: await t0(lo + 1) }, clickhouse_settings: { workload: "bulk" } });
     await insert("ctl_cursors", [{ name: "payouts", block: hi, hash: "", version: Date.now() }], `payouts:${hi}`);
     n = hi - lo;
   }
-  if (Date.now() - erc20At > 3_600_000) { erc20At = Date.now(); await slow.command({ query: ERC20_PAYOUTS, clickhouse_settings: { workload: "bulk" } }); n++; }
+  if (Date.now() - quotes.at > 3_600_000) quotes = { at: Date.now(), q: [WETH, USDG, ...(await rows<{ q: string }>(QUOTES)).map((r) => r.q)] };
+  const q = quotes.q, elo = Number(c.e) || lo, ehi = Math.min(Number(c.t) - LAG, elo + ERC20_MAX); // the hourly scan covered all up to now
+  if (ehi - elo >= ERC20_STEP) {
+    const p = { q, lo: elo, hi: ehi, t0: await t0(elo + 1) };
+    const cs = (await rows<{ c: string }>(RANGE_CURVES, p)).map((r) => r.c);
+    if (cs.length) await ch.command({ query: ERC20_PAYOUTS(IN_RANGE), query_params: { ...p, c: cs }, clickhouse_settings: { workload: "bulk" } });
+    await insert("ctl_cursors", [{ name: "payouts_erc20", block: ehi, hash: "", version: Date.now() }], `payouts_erc20:${ehi}`);
+    n++;
+  }
+  const since = Number(c.m) || Date.now() - 7_200_000; // markets written before this were in the last hourly scan
+  // from the batch's earliest mint (an hour early), so the reads skip older parts: an hour's 13 curves 1.9M rows, 0.8 s; 100 over a
+  // week 41.5M, 15 s; the same 100 unbounded 81M, 67 s (2026-11-05)
+  const fresh = await rows<{ c: string; v: string; t: string }>(`SELECT m.curve AS c, max(m.version) AS v, toString(greatest(min(o.time), toDateTime(3600)) - INTERVAL 1 HOUR) AS t
+    FROM (SELECT token, curve, version FROM token_markets FINAL WHERE curve != '' AND version > {since:UInt64}) AS m
+    LEFT JOIN (SELECT token, time FROM token_origin FINAL) AS o ON o.token = m.token GROUP BY c ORDER BY v LIMIT ${BATCH} WITH TIES`, { since });
+  if (fresh.length) {
+    const floor = fresh.map((r) => r.t).sort()[0]; // no origin row is 1970 (all); ponytail: one floor per batch, the oldest token's; per-month batches if mixed ages cost too much
+    await slow.command({ query: ERC20_PAYOUTS(OF_CURVES), query_params: { q, c: fresh.map((r) => r.c), lo: 0, hi: FAR, t0: floor }, clickhouse_settings: { workload: "bulk" } });
+    const v = Math.max(...fresh.map((r) => Number(r.v)));
+    await insert("ctl_cursors", [{ name: "payouts_markets", block: v, hash: "", version: Date.now() }], `payouts_markets:${v}`);
+    n++;
+  } else if (!Number(c.m)) await insert("ctl_cursors", [{ name: "payouts_markets", block: since, hash: "", version: Date.now() }], `payouts_markets:${since}`);
   return n;
 }
 

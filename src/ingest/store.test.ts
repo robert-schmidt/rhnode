@@ -81,13 +81,17 @@ test("synthetic fork: rollback empties the block and zeroes balances, idempotent
 });
 
 test("curve payouts: a rerun writes nothing; a row stored without USD is written again once it has a price", { skip }, async () => {
-  const { ERC20_PAYOUTS } = await import("../discovery.ts");
+  const { ERC20_PAYOUTS, IN_RANGE, OF_CURVES } = await import("../discovery.ts");
   const { WETH } = await import("../chain/constants.ts");
   const curve = "0x" + "c".repeat(40), time = new Date().toISOString().slice(0, 19).replace("T", " ");
   await insert("token_markets", [{ token: "0x" + "a".repeat(40), curve, version: 1 }], "t-payout-market");
   await insert("kept_transfers", [{ block: 7, tx_hash: "0x" + "1".repeat(64), time, token: WETH, from: curve, to: "0x" + "b".repeat(40),
     amount: "1000000000000000000", standard: "erc20", keep: 1, sign: 1 }], "t-payout-transfer");
-  const run = async () => { await ch.command({ query: ERC20_PAYOUTS }); await ch.command({ query: ERC20_PAYOUTS }); return n("curve_payouts"); };
+  const p = { q: [WETH], c: [curve], lo: 6, hi: 7, t0: "2026-01-01 00:00:00" }, all = { ...p, lo: 0, hi: Number.MAX_SAFE_INTEGER, t0: "1970-01-01 00:00:00" };
+  const run = async () => { // the range step and the by-address step write the same row
+    for (const [k, query_params] of [[IN_RANGE, p], [OF_CURVES, all], [IN_RANGE, p]] as const) await ch.command({ query: ERC20_PAYOUTS(k), query_params });
+    return n("curve_payouts");
+  };
   assert.equal(await run(), 1); // no ETH/USD yet: stored once, usd null
   await insert("ev_prices", [{ block: 7, time, token: "0x" + "a".repeat(40), quote: WETH, venue: "v2", eth_usd: 3000, verified: 1, sign: 1 }], "t-payout-price");
   assert.equal(await run(), 2); // the priced row, once
