@@ -88,6 +88,15 @@ const tf = (r: { block: string; tx_index: number; log_index: number; tx_hash: st
   ({ block: Number(r.block), tx_index: r.tx_index, log_index: r.log_index, tx_hash: r.tx_hash, from: r.from, to: r.to, amount: BigInt(r.amount), ts: r.ts });
 // UInt64/UInt256 arrive as JSON strings; never re-alias a column under its own name (it shadows it in WHERE/ORDER BY)
 const TF_COLS = "block, tx_index, log_index, tx_hash, `from`, `to`, amount, toUnixTimestamp(time) AS ts";
+// kept_transfers is partitioned by toYYYYMM(time), but with FINAL a time filter prunes no partition (EXPLAIN: 150/150
+// parts); only _partition_id does. A token's window read 975K rows / 2.8 s, with its months 151K / 0.16 s, same rows
+// (2026-11-06). The months from a to b (unix s, a day of margin each side), b capped at now.
+export function months(a: number, b: number): string[] {
+  const out: string[] = [], d = new Date((a - 86_400) * 1000), end = Math.min(b + 86_400, Date.now() / 1000) * 1000;
+  for (d.setUTCDate(1), d.setUTCHours(0, 0, 0, 0); d.getTime() <= end; d.setUTCMonth(d.getUTCMonth() + 1))
+    out.push(`${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
+  return out;
+}
 const pct = (a: bigint, of: bigint) => (of > 0n ? Number((a * 1_000_000n) / of) / 10_000 : null);
 
 export type Reply = { status: number; body: unknown };
@@ -135,9 +144,11 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
 
   // the tape: the block window, and the first `minutes` after launch when asked for (one read covers both)
   const t0 = await blockTime(up, from);
+  // the window's end: its last block (5 s a block is far above the chain's ~0.1 s) or the first `minutes`, whichever is later
+  const win0 = months(t0, Math.max(t0 + minutes * 60, t0 + (to - from) * 5)), toNow = months(t0, Date.now() / 1000);
   const tape = (await rows<Parameters<typeof tf>[0]>(
-    `SELECT ${TF_COLS} FROM kept_transfers FINAL WHERE token = {t:String} AND block >= {a:UInt64} AND (block <= {b:UInt64} OR time < toDateTime({te:UInt64}))
-     AND standard = 'erc20' AND sign = 1 ORDER BY block, log_index LIMIT {m:UInt32}`, { t, a: from, b: to, te: t0 + minutes * 60, m: MAX_WINDOW_ROWS + 1 })).map(tf);
+    `SELECT ${TF_COLS} FROM kept_transfers FINAL WHERE token = {t:String} AND _partition_id IN {pm:Array(String)} AND block >= {a:UInt64} AND (block <= {b:UInt64} OR time < toDateTime({te:UInt64}))
+     AND standard = 'erc20' AND sign = 1 ORDER BY block, log_index LIMIT {m:UInt32}`, { t, pm: win0, a: from, b: to, te: t0 + minutes * 60, m: MAX_WINDOW_ROWS + 1 })).map(tf);
   const truncated = tape.length > MAX_WINDOW_ROWS;
   if (truncated) tape.length = MAX_WINDOW_ROWS;
   const win = tape.filter((x) => x.block <= to);
@@ -162,8 +173,8 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
 
   const [later, bals, signers, funders, firsts, quotes, prices, decs] = await Promise.all([
     ws.length ? rows<Parameters<typeof tf>[0]>(
-      `SELECT ${TF_COLS} FROM kept_transfers FINAL WHERE token = {t:String} AND block >= {a:UInt64} AND standard = 'erc20' AND sign = 1
-       AND (\`from\` IN {w:Array(String)} OR \`to\` IN {w:Array(String)}) ORDER BY block, log_index LIMIT {m:UInt32}`, { t, a: from, w: ws, m: MAX_LATER_ROWS }).then((r) => r.map(tf)) : [],
+      `SELECT ${TF_COLS} FROM kept_transfers FINAL WHERE token = {t:String} AND _partition_id IN {pm:Array(String)} AND block >= {a:UInt64} AND standard = 'erc20' AND sign = 1
+       AND (\`from\` IN {w:Array(String)} OR \`to\` IN {w:Array(String)}) ORDER BY block, log_index LIMIT {m:UInt32}`, { t, pm: toNow, a: from, w: ws, m: MAX_LATER_ROWS }).then((r) => r.map(tf)) : [],
     ws.length ? rows<{ holder: string; b: string }>(
       "SELECT holder, toString(sum(balance)) AS b FROM agg_balances WHERE token = {t:String} AND holder IN {w:Array(String)} GROUP BY holder", { t, w: ws }) : [],
     txSigners(up, txh),
@@ -173,8 +184,8 @@ async function build(up: Up, t: string, blocks: number, n: number, minutes: numb
     ws.length ? rows<{ wallet: string; b: string; nonce: string }>(
       "SELECT wallet, toString(min(first).1) AS b, toString(min(first).3) AS nonce FROM agg_wallet_first WHERE wallet IN {w:Array(String)} GROUP BY wallet", { w: ws }) : [],
     txh.length ? rows<{ token: string; from: string; tx_hash: string; amount: string }>(
-      `SELECT token, \`from\`, tx_hash, amount FROM kept_transfers FINAL WHERE token IN {q:Array(String)} AND block >= {a:UInt64} AND block <= {b:UInt64}
-       AND tx_hash IN {h:Array(String)} AND sign = 1`, { q: quoteTokens, a: from, b: to, h: txh }) : [],
+      `SELECT token, \`from\`, tx_hash, amount FROM kept_transfers FINAL WHERE token IN {q:Array(String)} AND _partition_id IN {pm:Array(String)} AND block >= {a:UInt64} AND block <= {b:UInt64}
+       AND tx_hash IN {h:Array(String)} AND sign = 1`, { q: quoteTokens, pm: win0, a: from, b: to, h: txh }) : [],
     rows<{ token: string; p: number }>(`SELECT token, argMaxMerge(close_usd) AS p FROM agg_candles_1m WHERE token IN {q:Array(String)}
       AND minute <= toDateTime({at:UInt64}) AND minute >= toDateTime({at:UInt64}) - 3600 GROUP BY token`, { q: [NATIVE_ETH, ...quoteTokens], at: t0 }),
     rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE token IN {q:Array(String)}", { q: quoteTokens }),

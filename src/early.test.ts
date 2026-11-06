@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deduceMarkets, foldWindow, perMinute, since, type Tf } from "./early.ts";
+import { deduceMarkets, foldWindow, months, perMinute, since, type Tf } from "./early.ts";
 
 const A = (c: string) => "0x" + c.repeat(40), CURVE = A("c"), W1 = A("1"), W2 = A("2"), W3 = A("3"), SIDE = A("5");
 let k = 0;
@@ -30,4 +30,13 @@ test("perMinute: new buyers and net inflow per minute after launch; wallet-to-wa
   const m = perMinute([t(1, CURVE, W1, 10n, "a", 1000), t(2, CURVE, W2, 5n, "b", 1030), t(3, W1, W2, 4n, "c", 1065), t(4, W2, CURVE, 2n, "d", 1070)],
     new Set([CURVE]), 1000, 2);
   assert.deepEqual(m, [{ minute: 0, new_buyers: 2, net_inflow: "15", txs: 2 }, { minute: 1, new_buyers: 0, net_inflow: "-2", txs: 2 }]);
+});
+
+test("months: kept_transfers partitions a window touches, a day of margin each side, never past now", () => {
+  const t = (s: string) => Date.parse(s) / 1000;
+  assert.deepEqual(months(t("2026-11-03T12:00Z"), t("2026-11-03T13:00Z")), ["202611"]);
+  assert.deepEqual(months(t("2026-11-01T00:30Z"), t("2026-11-01T01:00Z")), ["202610", "202611"]);
+  assert.deepEqual(months(t("2026-07-15T00:00Z"), t("2026-09-02T00:00Z")), ["202607", "202608", "202609"]);
+  assert.deepEqual(months(t("2025-12-31T23:00Z"), t("2026-01-01T00:30Z")), ["202512", "202601"]);
+  assert.equal(months(Date.now() / 1000 - 3600, 4e9).at(-1), new Date().toISOString().slice(0, 7).replace("-", ""));
 });

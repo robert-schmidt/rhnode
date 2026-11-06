@@ -22,7 +22,10 @@ export async function indexWallets(ws: string[]): Promise<State[]> {
   const [s] = await rows<{ lo: string; days: number }>("SELECT min(number) AS lo, greatest(1, (max(time) - min(time)) / 86400) AS days FROM raw_blocks");
   const out: State[] = [];
   for (const wallet of ws) {
-    const [c] = await rows<{ n: string }>(`SELECT count() AS n FROM raw_txs WHERE sign = 1 AND ${TOUCH}`, { w: wallet });
+    // idx_wallet_txs (migration 015) is keyed by wallet; the same count over raw_txs scanned all of it, 48M rows / 13 s
+    // per wallet under load (2026-11-06 14:38), and every explorer page queues its address here. ponytail: rows not yet
+    // merged away can count twice; it only decides "busy".
+    const [c] = await rows<{ n: string }>("SELECT count() AS n FROM idx_wallet_txs WHERE wallet = {w:String} AND block >= {lo:UInt64}", { w: wallet, lo: s.lo });
     const txs = Number(c.n), perDay = Math.round(txs / s.days);
     out.push(perDay > MAX_DAY
       ? { wallet, status: "busy", floor: 0, txs, note: `${perDay} txs a day (the cap is ${MAX_DAY})` }
