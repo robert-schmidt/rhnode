@@ -2,6 +2,7 @@
 # Node box hardening (Ubuntu): SSH keys only for one user, root locked, ufw letting in only SSH from the LAN, fail2ban,
 # kernel network sysctls, and the rhnode port firewall at boot. Idempotent. Run as root from the repo:
 #   LAN=192.168.0.0/16 SSH_USER=<you> sh ops/harden.sh   (SSH_USER defaults to the repo's owner)
+# Optional: POWER_W=<watts> (CPU package cap), SWAP_GB=<size> (swap file, swappiness 10).
 set -eux
 cd "$(dirname "$0")/.."
 LAN=${LAN:-192.168.0.0/16}; SSH_USER=${SSH_USER:-$(stat -c %U .)}
@@ -87,5 +88,16 @@ EOF
   systemctl enable rhnode-power.service
   systemctl restart rhnode-power.service
 fi
+
+# Optional swap file (SWAP_GB) as a buffer against the kernel's OOM killer, not as memory: a sudden spike pushes idle
+# pages out instead of killing Nitro, which then replays tens of thousands of unsaved blocks (2026-11-01, 2026-11-03).
+# Swappiness 10 keeps hot pages in RAM. Nitro can't swap itself (memswap_limit = mem_limit in compose.yaml), so it still
+# reaches ops/heal.sh's clean restart instead of slowing down.
+if [ -n "${SWAP_GB:-}" ] && ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  [ -f /swapfile ] || { fallocate -l "${SWAP_GB}G" /swapfile; chmod 600 /swapfile; mkswap /swapfile; }
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+[ -n "${SWAP_GB:-}" ] && { echo 'vm.swappiness = 10' > /etc/sysctl.d/91-rhnode-swap.conf; sysctl -q -w vm.swappiness=10; }
 ufw status verbose
 iptables -L RHNODE -n
