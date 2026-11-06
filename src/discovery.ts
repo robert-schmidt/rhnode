@@ -18,8 +18,8 @@
 //   out of a curve from kept_transfers, block range by range at the same lag, and all of a curve's rows by address when
 //   it is found later (an old token, once the history pass reaches its mint): only rows not stored yet, or stored
 //   without a USD value that has one now (pre-go-live prices come later), so a rerun writes nothing.
-// Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass: while the pass
-// runs, it rests DISCOVERY_REST times as long as a round took (each token read touches a granule in every kept_transfers
+// Throttled (DISCOVERY_PAR calls at a time, a pause between batches) so it never slows the history pass or the API: it
+// rests DISCOVERY_REST times as long as a round took (each token read touches a granule in every kept_transfers
 // part, ~260K rows whatever its size: measured 2026-10-31, unthrottled it cut the pass from ~800 to ~250 inserts per 5 min).
 import { keccak256 } from "viem";
 import { createClient } from "@clickhouse/client";
@@ -321,8 +321,9 @@ async function discoveryLoop(up: Up): Promise<never> {
   for (let wait = 0; ; await new Promise((r) => setTimeout(r, wait))) {
     try {
       const t0 = Date.now(), n = await creations(up) + await markets(up) + await payouts();
-      const [w] = await rows<{ b: string }>("SELECT max(block) AS b FROM ctl_cursors FINAL WHERE name = 'walk'");
-      wait = !n ? 60_000 : Number(w?.b ?? 0) > 0 ? Math.max(1_000, REST * (Date.now() - t0)) : 1_000;
+      // it rests REST times its round always, not only while the history pass ran: once the pass was done it ran flat out,
+      // ~0.25 of ClickHouse's 3.5 CPUs while API reads queued behind them (2026-11-06 06:10)
+      wait = !n ? 60_000 : Math.max(1_000, REST * (Date.now() - t0));
     } catch (e) { console.error("discovery:", (e as Error).message); wait = 60_000; } // ingest may not have migrated yet
   }
 }
