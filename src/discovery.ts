@@ -140,9 +140,15 @@ async function infraSet(): Promise<Set<string>> {
 }
 
 async function origins(up: Up, n: number): Promise<number> {
+  // Candidates without FINAL first (PREWHERE reads only `checked`), then FINAL by those keys: FINAL over the whole table
+  // to find the few unchecked tokens read 5.6M rows / 3.3 s every round (2026-11-06 16:50). Unmerged checked=0 versions
+  // of tokens already checked are candidates too until a merge drops them; FINAL sorts them out.
+  const cands = (await rows<{ token: string }>(
+    "SELECT token FROM token_origin PREWHERE checked = 0 GROUP BY token ORDER BY max(block) DESC LIMIT {n:UInt32}", { n: Math.min(n, 500) })).map((r) => r.token); // ≤500: parameters travel in the URL
+  if (!cands.length) return 0;
   const due = await rows<Record<string, unknown> & { token: string; tx_hash: string; v: string }>(
     `SELECT token, block, tx_index, log_index, tx_hash, time, mint_recipient, toString(amount) AS amt, toString(version) AS v
-     FROM token_origin FINAL WHERE checked = 0 ORDER BY block DESC LIMIT {n:UInt32}`, { n });
+     FROM token_origin FINAL PREWHERE token IN {c:Array(String)} WHERE checked = 0 ORDER BY block DESC LIMIT {n:UInt32}`, { c: cands, n });
   if (!due.length) return 0;
   const traced = new Map((await rows<{ created: string; creator: string }>(
     "SELECT created, creator FROM creations FINAL WHERE created IN {t:Array(String)}", { t: due.map((d) => d.token) })).map((r) => [r.created, r.creator]));
