@@ -4,6 +4,8 @@
 -- projection is chosen by itself); a wallet's day 141K -> 2K rows. mv_kept_trades and the PnL views read FROM ev_trades,
 -- so the rows written during the copy go through staging + ATTACH PARTITION (fires no MV; the staging table copies the
 -- projection, which ATTACH needs). Bulk copy ahead by hand as in 038. The old table stays as ev_trades_swap until checked.
+-- A projection refuses lightweight DELETEs (and in 'rebuild' mode its reads still saw masked rows), so the reorg drop
+-- (src/ingest/reorg.ts) deletes from ev_trades with a mutation.
 CREATE TABLE IF NOT EXISTS ev_trades_swap AS ev_trades ENGINE = MergeTree PARTITION BY toYYYYMMDD(time) ORDER BY (wallet, block, tx_index, token)
   TTL time + INTERVAL ${RAW_TTL_DAYS} DAY SETTINGS ttl_only_drop_parts = 1, non_replicated_deduplication_window = 10000, index_granularity = 256;
 ALTER TABLE ev_trades_swap ADD PROJECTION IF NOT EXISTS p_token (SELECT * ORDER BY token, time);

@@ -59,6 +59,10 @@ export async function negate(from: number, tag: string): Promise<void> {
 
 /** Step 2: delete every row ≥ from (both signs) from raw/ev/kept. */
 export async function drop(from: number): Promise<void> {
-  for (const t of [...EV, ...RAW, ...KEPT]) await ch.command({ query: `DELETE FROM ${t} WHERE block >= {from:UInt64}`, query_params: { from } });
+  // ev_trades has a projection (migration 039): a lightweight DELETE throws there, and in 'rebuild' mode its reads still
+  // saw the masked rows (checked on CH 26.3). A mutation rewrites the few recent parts, projection included.
+  for (const t of [...EV, ...RAW, ...KEPT]) await ch.command(t === "ev_trades"
+    ? { query: `ALTER TABLE ${t} DELETE WHERE block >= {from:UInt64}`, query_params: { from }, clickhouse_settings: { mutations_sync: "2" } }
+    : { query: `DELETE FROM ${t} WHERE block >= {from:UInt64}`, query_params: { from } });
   for (const t of ["raw_blocks", "kept_blocks"]) await ch.command({ query: `DELETE FROM ${t} WHERE number >= {from:UInt64}`, query_params: { from } });
 }
