@@ -136,7 +136,13 @@ async function missing(fromDate: string, fix = false) {
     for (const d of await rows<{ token: string; decimals: number }>("SELECT token, decimals FROM serve_tokens FINAL WHERE decimals >= 0 AND token IN {t:Array(String)}", { t: toks.slice(i, i + 1_000) }))
       decimals.set(d.token, d.decimals);
   const isBridged = (p: PoolRow) => !(p.token0 in QUOTE_DECIMALS) && !(p.token1 in QUOTE_DECIMALS);
-  const ids = [...pools.keys()].sort();
+  // --missing resumes after the last pool it finished (ctl_cursors 'hist_candles_missing', hash = from-date:pool): the
+  // server's memory cap stopped it three times on 2026-11-06, and each restart redid every pool that had no price
+  const [rc] = fix ? [] : await rows<{ hash: string }>("SELECT hash FROM ctl_cursors FINAL WHERE name = 'hist_candles_missing'");
+  const after = rc?.hash.startsWith(`${fromDate}:`) ? rc.hash.slice(fromDate.length + 1) : "";
+  const ids = [...pools.keys()].sort().filter((id) => id > after);
+  const mark = (hash: string) => ch.insert({ table: "ctl_cursors", values: [{ name: "hist_candles_missing", block: 0, hash, version: Date.now() }], format: "JSONEachRow" });
+  if (after) console.log(`[hist-candles --missing] resuming after ${after}`);
   console.log(`[hist-candles --missing] ${traded.length} pools traded before go-live, ${want.length} without candles, ${pools.size} resolved to price`);
   const eth = new Map((await rows<{ m: number; c: number }>(
     `SELECT toUnixTimestamp(minute) AS m, argMax(c, v) AS c FROM (SELECT minute, pool, argMaxMerge(close) AS c, sum(volume_usd) AS v FROM agg_candles_1m
@@ -147,7 +153,8 @@ async function missing(fromDate: string, fix = false) {
   let swaps = 0, priced = 0;
   const t0 = Date.now();
   // --fix: 100 pools a batch; 1,000 hit the server's memory cap in the FINAL merge 3 times after a catch-up (2026-11-02)
-  const per = fix ? 100 : 1_000;
+  // --missing: 500, as 1,000 hit it under load (2026-11-06 00:53, 02:35)
+  const per = fix ? 100 : 500;
   for (let i = 0; i < ids.length; i += per) {
     const batch = ids.slice(i, i + per);
     const bt = [...new Set(batch.flatMap((id) => { const p = pools.get(id)!; return isBridged(p) ? [p.token0, p.token1] : []; }))].filter((t) => decimals.has(t));
@@ -176,8 +183,10 @@ async function missing(fromDate: string, fix = false) {
       if (out.length >= FLUSH) { await insert(into, out, `${tag}:${fromDate}:${batch[0]}:${n++}`); priced += out.length; out = []; }
     }
     if (out.length) { await insert(into, out, `${tag}:${fromDate}:${batch[0]}:${n++}`); priced += out.length; }
+    if (!fix) await mark(`${fromDate}:${batch[batch.length - 1]}`);
     console.log(JSON.stringify({ at: new Date().toISOString(), pools: Math.min(i + per, ids.length), of: ids.length, bridgeTokens: bt.length, swaps, priced, s: Math.round((Date.now() - t0) / 1000) }));
   }
+  if (!fix) await mark(""); // done: a later run starts over
   console.log(`[hist-candles --missing] done: ${swaps} swaps, ${priced} priced, ${Math.round((Date.now() - t0) / 1000)} s`);
 }
 
