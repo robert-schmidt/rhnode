@@ -44,17 +44,24 @@ async function trace(node: string, hashes: string[]): Promise<{ txHash: string; 
 
 const cursor = async (name: string) =>
   (await rows<{ block: string }>("SELECT block FROM ctl_cursors FINAL WHERE name = {name:String}", { name }))[0]?.block;
+const cursors = async () => Object.fromEntries((await rows<{ name: string; block: string }>(
+  "SELECT name, block FROM ctl_cursors FINAL WHERE name IN ('trace', 'tip')")).map((r) => [r.name, Number(r.block)]));
+// Each step costs ~5 serial ClickHouse round trips, ~1.4 s when ClickHouse is busy, against ~350 ms to trace 20 blocks
+// (2026-11-06 00:10, query_log + a timed trace): at 20 blocks a step the tracer fell behind in bursts (gaps 144, 145).
+// Behind by more than CATCHUP batches, a step takes CATCHUP batches, traced one batch at a time (Nitro's load is unchanged).
+const CATCHUP = 4;
 const setCursor = (block: number, hash: string) =>
   ch.insert({ table: "ctl_cursors", values: [{ name: "trace", block, hash, version: Date.now() }], format: "JSONEachRow" });
 
 export async function traceLoop(node: string, publish?: (msg: string) => Promise<unknown>): Promise<never> {
   let cur = Number((await cursor("trace")) ?? (await cursor("tip")) ?? 0);
   console.log(`[traces] from ${cur + 1}, node ${new URL(node).host}`);
+  let tried = { from: 0, to: 0 };
   for (;;) {
     try {
-      const t = await cursor("trace");
-      if (t !== undefined && Number(t) < cur) cur = Number(t); // a rollback rewound it
-      const tip = Number((await cursor("tip")) ?? 0);
+      const c = await cursors();
+      if (c.trace !== undefined && c.trace < cur) cur = c.trace; // a rollback rewound it
+      const tip = c.tip ?? 0;
       if (tip <= cur) { await sleep(200); continue; }
       if (tip - cur > MAX_BEHIND) {
         const skip = tip - B; // the tip cursor is a batch end, so this is the end of the batch before it
@@ -64,12 +71,16 @@ export async function traceLoop(node: string, publish?: (msg: string) => Promise
         cur = skip;
         continue;
       }
-      const from = cur + 1, to = Math.min(tip, from - (from % B) + B - 1);
+      const from = cur + 1, S = tip - cur > CATCHUP * B ? CATCHUP * B : B;
+      // a retry of a failed step takes the same range, so its dedup token drops rows the failed try already stored
+      const to = from === tried.from && tried.to <= tip ? tried.to :Math.min(tip, from - (from % S) + S - 1);
+      tried = { from, to };
       const blocks = await rows<{ number: string; hash: string; time: number }>(
         "SELECT number, hash, toUInt32(time) AS time FROM raw_blocks WHERE number BETWEEN {from:UInt64} AND {to:UInt64} AND sign = 1 ORDER BY number",
         { from, to });
       if (blocks.length !== to - from + 1) { await sleep(500); continue; } // a rollback is under way
-      const res = await trace(node, blocks.map((b) => b.hash));
+      const res: Awaited<ReturnType<typeof trace>> = [];
+      for (let i = 0; i < blocks.length; i += B) res.push(...await trace(node, blocks.slice(i, i + B).map((b) => b.hash)));
       const out = blocks.flatMap((b, i) => res[i].flatMap((x, tx) => (x.result ? flatten(Number(b.number), b.time, tx, x.txHash.toLowerCase(), x.result) : [])));
       const last = blocks[blocks.length - 1].hash;
       await insert("raw_traces", out, `${from}-${to}:${last}`);
