@@ -74,9 +74,6 @@ export async function official(t: string[]): Promise<Map<string, string>> {
     l.source === "pons-v2" ? (M.has(l.token) ? G.get(l.token) ?? "" : field(l.detail, "curve"))
       : l.source === "bags" ? field(l.detail, "poolId") : field(M.get(l.token)?.detail, "pool")]));
 }
-// pools FINAL by token0/token1 (migration 035's indexes): exact mode re-reads every key range the unmerged parts share
-// (1.39M of 1.65M rows); every version of a pool has the same tokens, so the index alone finds them all (103K rows).
-const BY_TOKEN = "SETTINGS use_skip_indexes_if_final_exact_mode = 0";
 const BAND = 92_103, MAX_TICK = 887_272; // ln(10,000) / ln(1.0001) ticks each side
 const LAUNCHPADS = [...PROTOCOL.values()].filter((e) => e.kind === "launchpad").map((e) => e.address);
 const LOCKERS = [...PROTOCOL.values()].filter((e) => e.kind === "locker").map((e) => e.address);
@@ -265,6 +262,34 @@ const picked = new Map<string, { at: number; p: Pool }>();
 type Hold = { held: { token: string; holder: string; amt: string }[]; top: { token: string; top: string }[] };
 const holds = new Map<string, { at: number } & Hold>();
 
+// top10 leaves out pools and v4 hooks. Read by the batch's tokens, pools cost ~400K of the query's 515K rows for 8
+// tokens (bloom filters; 277 CPU-s per 30 min, 2026-11-06 15:20). Instead: each token's top TOP_CANDIDATES holders, then
+// those addresses by pools' key, and every hook (31K, 0.15 CPU-s a read) refreshed each minute. Any pool or hook is
+// left out now, not only the batch's own: neither is a holder. Same top10 as the old query for all 7,856 tokens cards
+// asked for in an hour (with 25 candidates one token, 7 pools among its top 12, summed fewer than 10). ponytail: a token
+// with more than 40 pools/hooks among its top 50 holders still sums fewer than 10.
+const TOP_CANDIDATES = 50;
+let hooks: { at: number; s: Promise<Set<string>> } = { at: 0, s: Promise.resolve(new Set()) };
+function hookSet(): Promise<Set<string>> {
+  if (Date.now() - hooks.at > 60_000) {
+    const s = rows<{ h: string }>("SELECT DISTINCT hooks AS h FROM pools WHERE length(hooks) = 42").then((r) => new Set(r.map((x) => x.h)));
+    hooks = { at: Date.now(), s };
+    s.catch(() => { if (hooks.s === s) hooks.at = 0; }); // a failed read is retried by the next build
+  }
+  return hooks.s;
+}
+/** Sums each token's 10 largest holders that aren't skipped; cs comes ordered by balance, largest first. */
+export function topTen(cs: { token: string; holder: string; amt: string }[], skip: (holder: string) => boolean): { token: string; top: string }[] {
+  const m = new Map<string, { n: number; s: bigint }>();
+  for (const r of cs) {
+    if (skip(r.holder)) continue;
+    const e = m.get(r.token) ?? { n: 0, s: 0n };
+    if (e.n < 10) { e.n++; e.s += BigInt(r.amt); }
+    m.set(r.token, e);
+  }
+  return [...m].map(([token, e]) => ({ token, top: e.s.toString() }));
+}
+
 /** The main pool of each token: verified first, then 24 h net volume, then all-time volume. One query used to do it all,
  * but it read all of pools by token (a batch's tokens are in ~900K pools, mostly as the quote) and NET24 again: 19 s, 680
  * MiB for 48 tokens under load (2026-11-05 17:45). The candidates' pools by key instead, ranked here with build's NET24. */
@@ -353,12 +378,16 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     rows<{ token: string; holder: string; amt: string }>(
       `SELECT token, holder, toString(b) AS amt FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances
        WHERE token IN {t:Array(String)} AND holder IN {s:Array(String)} GROUP BY token, holder HAVING b > 0)`, { t: full, s: special }),
-    rows<{ token: string; top: string }>(
-      `SELECT token, toString(sum(b)) AS top FROM (SELECT token, holder, b FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances
+    rows<{ token: string; holder: string; amt: string }>(
+      `SELECT token, holder, toString(b) AS amt FROM (SELECT token, holder, sum(balance) AS b FROM agg_balances
          WHERE token IN {t:Array(String)} GROUP BY token, holder HAVING b > 0) WHERE holder NOT IN {x:Array(String)} AND holder != token
-           AND holder NOT IN (SELECT toFixedString(a, 42) FROM pools FINAL ARRAY JOIN [pool, hooks] AS a
-             WHERE (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)}) AND length(a) = 42)
-         ORDER BY b DESC LIMIT 10 BY token) GROUP BY token ${BY_TOKEN}`, { t: full, x: exclude }),
+       ORDER BY b DESC LIMIT ${TOP_CANDIDATES} BY token`, { t: full, x: exclude }).then(async (cs) => {
+      const hs = await hookSet(), c = [...new Set(cs.map((r) => r.holder))].filter((h) => !hs.has(h));
+      const ps = (await Promise.all(Array.from({ length: Math.ceil(c.length / 500) }, (_, i) => rows<{ pool: string }>(
+        "SELECT DISTINCT pool FROM pools PREWHERE pool IN {c:Array(String)}", { c: c.slice(i * 500, i * 500 + 500) })))).flat();
+      const pools = new Set(ps.map((p) => p.pool));
+      return topTen(cs, (h) => hs.has(h) || pools.has(h));
+    }),
   ]) : [[], []];
   for (const tk of full) if (old(tk)) holds.set(tk, { at: now, held: held.filter((r) => r.token === tk), top: top.filter((r) => r.token === tk) });
   for (const tk of kept) { const k = holds.get(tk)!; held.push(...k.held); top.push(...k.top); }

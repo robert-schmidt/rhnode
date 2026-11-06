@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { band, poolState } from "./cards.ts";
+import { band, poolState, topTen } from "./cards.ts";
 
 const near = (a: number | null | undefined, b: number, tol = 1e-9) => assert.ok(a != null && Math.abs(a - b) <= Math.abs(b) * tol, `${a} ≠ ${b}`);
 const X96 = 2n ** 96n;
@@ -50,4 +50,14 @@ test("poolState: a Metric OMM pool's price is its last trade, its liquidity both
   const m = poolState("omm", true, 18, 6, 1, { b0: 10n ** 24n, b1: 5n * 10n ** 10n, last: 0.04 })!;
   assert.equal(m.price, 0.04); near(m.liquidityUsd, 90_000); near(m.quoteUsd, 50_000); assert.equal(m.kind, "balances");
   assert.equal(poolState("omm", true, 18, 6, 1, { b0: 10n ** 24n, b1: 5n * 10n ** 10n })!.liquidityUsd, null); // no trade yet
+});
+
+test("topTen: each token's 10 largest holders that aren't skipped", () => {
+  const cs = [
+    ...Array.from({ length: 12 }, (_, i) => ({ token: "a", holder: `h${i}`, amt: String(100 - i) })),
+    { token: "b", holder: "pool", amt: "1000" }, { token: "b", holder: "w", amt: "5" },
+  ];
+  // a: h1 skipped, so h0 + h2..h10 (100 + 98 + ... + 90); b: the pool skipped
+  assert.deepEqual(topTen(cs, (h) => h === "h1" || h === "pool"), [{ token: "a", top: String(100 + 98 + 97 + 96 + 95 + 94 + 93 + 92 + 91 + 90) }, { token: "b", top: "5" }]);
+  assert.deepEqual(topTen([{ token: "c", holder: "pool", amt: "7" }], () => true), []);
 });
