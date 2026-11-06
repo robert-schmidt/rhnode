@@ -50,20 +50,30 @@ export const NET24 = `SELECT token, pool, any(qt) AS q, sum(abs(nt)) AS nv, sum(
   FROM (SELECT token, pool, tx_hash, any(quote) AS qt, min(time) AS tm,
     sum(if(quote_delta > 0, usd, -usd) * sign) AS nt, sum(usd * sign) AS gr FROM ev_prices
     WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, pool, tx_hash) GROUP BY token, pool`;
-// per launchpad token (rows only for tokens of Pons v2, Bags, Flap, hood.fun), its own market (op; '' when it has none yet);
-// tested on the node's ClickHouse 2026-10-31. FINAL doesn't move WHERE to PREWHERE, so it read every row's detail: the
-// PREWHERE columns are the same in every version of a row (token, kind: in its key; hooks, tokens, created_block: fixed
-// for a pool), so filtering before the merge keeps FINAL's answer (sign stays after it). Measured 2026-11-01, 50 tokens:
-// 8.6 s / 300 MiB → 2.4 s / 62 MiB, same rows
-export const OFFICIAL = `SELECT l.token AS token, multiIf(l.source = 'pons-v2' AND m.token != '', g.pool, l.source = 'pons-v2', JSONExtractString(l.detail, 'curve'),
-    l.source = 'bags', JSONExtractString(l.detail, 'poolId'), JSONExtractString(m.detail, 'pool')) AS op
-  FROM (SELECT token, source, detail FROM kept_launches FINAL PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1
-        AND source IN ('pons-v2', 'bags', 'flap', 'hood-fun') ORDER BY block LIMIT 1 BY token) AS l
-  LEFT JOIN (SELECT token, block, detail FROM kept_launches FINAL PREWHERE token IN {t:Array(String)} AND kind = 'migration' WHERE sign = 1
-        ORDER BY block LIMIT 1 BY token) AS m ON m.token = l.token
-  LEFT JOIN (SELECT DISTINCT tk, pool, created_block FROM pools ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
-        AND tk IN {t:Array(String)} AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})) AS g -- the last: for migration 035's indexes
-        ON g.tk = l.token AND g.created_block = m.block`;
+// Per launchpad token (only tokens of Pons v2, Bags, Flap, hood.fun get an entry), its own market (op; '' when it has
+// none yet). PREWHERE before FINAL: token and kind are in kept_launches' key, so every version of a row has them and
+// filtering before the merge keeps FINAL's answer (8.6 s / 300 MiB -> 2.4 s / 62 MiB for 50 tokens, 2026-11-01).
+// The launch and migration rows come from one read, and pools (the graduated Pons pool, by hook and tokens) is read only
+// for Pons tokens that migrated: one query that joined both reads and always scanned pools took 944K rows for 8 tokens,
+// 374K of them pools (2026-11-06 15:20).
+export async function official(t: string[]): Promise<Map<string, string>> {
+  if (!t.length) return new Map();
+  const rs = await rows<{ token: string; kind: string; source: string; block: string; detail: string }>(
+    `SELECT token, toString(kind) AS kind, source, toString(block) AS block, detail FROM kept_launches FINAL
+     PREWHERE token IN {t:Array(String)} AND kind IN ('launch', 'migration') WHERE sign = 1
+       AND (kind = 'migration' OR source IN ('pons-v2', 'bags', 'flap', 'hood-fun')) ORDER BY block LIMIT 1 BY token, kind`, { t });
+  const L = new Map(rs.filter((r) => r.kind === "launch").map((r) => [r.token, r])), M = new Map(rs.filter((r) => r.kind === "migration").map((r) => [r.token, r]));
+  const field = (detail: string | undefined, k: string) => { try { const v = JSON.parse(detail || "{}")[k]; return typeof v === "string" ? v : ""; } catch { return ""; } };
+  const grad = [...L.values()].filter((l) => l.source === "pons-v2" && M.has(l.token)).map((l) => l.token);
+  const G = new Map<string, string>();
+  if (grad.length) for (const g of await rows<{ tk: string; pool: string; created_block: string }>(
+    `SELECT DISTINCT tk, pool, toString(created_block) AS created_block FROM pools ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
+     AND tk IN {t:Array(String)} AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})`, { t: grad }))
+    if (g.created_block === M.get(g.tk)?.block && !G.has(g.tk)) G.set(g.tk, g.pool);
+  return new Map([...L.values()].map((l) => [l.token,
+    l.source === "pons-v2" ? (M.has(l.token) ? G.get(l.token) ?? "" : field(l.detail, "curve"))
+      : l.source === "bags" ? field(l.detail, "poolId") : field(M.get(l.token)?.detail, "pool")]));
+}
 // pools FINAL by token0/token1 (migration 035's indexes): exact mode re-reads every key range the unmerged parts share
 // (1.39M of 1.65M rows); every version of a pool has the same tokens, so the index alone finds them all (103K rows).
 const BY_TOKEN = "SETTINGS use_skip_indexes_if_final_exact_mode = 0";
@@ -295,12 +305,12 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       "SELECT token, name, symbol, decimals, toString(total_supply) AS supply, toString(holder_count) AS holders, complete FROM serve_tokens FINAL WHERE token IN {t:Array(String)}", { t }),
     rows<{ token: string; deployer: string; source: string; block: string; time: number; detail: string }>(
       `SELECT token, deployer, source, toString(block) AS block, toUnixTimestamp(time) AS time, detail FROM kept_launches FINAL
-       PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1 ORDER BY block LIMIT 1 BY token`, { t }), // PREWHERE: as in OFFICIAL
+       PREWHERE token IN {t:Array(String)} AND kind = 'launch' WHERE sign = 1 ORDER BY block LIMIT 1 BY token`, { t }), // PREWHERE: as in official()
     // the main-pool candidates: every pool the token traded in (its all-time volume), and its launchpad's pool
     !choose.length ? null : Promise.all([
       rows<{ token: string; pool: string; v: number }>(
         "SELECT token, pool, sum(volume_usd) AS v FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool", { t: choose }),
-      rows<{ token: string; op: string }>(`SELECT token, op FROM (${OFFICIAL})`, { t: choose })]),
+      official(choose).then((m) => [...m].map(([token, op]) => ({ token, op })))]),
     rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
          uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
