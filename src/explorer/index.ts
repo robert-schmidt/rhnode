@@ -7,7 +7,7 @@ import { CSS, CSS_PATH, FAVICON, html, JS, JS_PATH, LOGO, page, REPO, withToken,
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
 import { address, block, hint, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
-import { RANGES, type Range } from "./charts.ts";
+import { chainCharts, RANGES, type Range } from "./charts.ts";
 
 const SECURITY = {
   "content-security-policy": "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -24,6 +24,10 @@ export function route(path: string, qs: URLSearchParams): Route {
     return { key: `/?range=${range}`, ttl: 2, run: (rpc) => home(rpc, range) };
   }
   if (path === "/live") return { key: "/live", ttl: 1, run: (rpc) => live(rpc) };
+  if (path === "/charts") { // the "Chain over time" section alone, for live.js's range switch
+    const range = (Object.hasOwn(RANGES, qs.get("range") ?? "") ? qs.get("range") : "7d") as Range;
+    return { key: `/charts?range=${range}`, ttl: 60, run: async () => ({ status: 200, title: "", fragment: true, body: await chainCharts(range) }) };
+  }
   let m = path.match(/^\/block\/([^/]+)$/);
   if (m) {
     if (NUM.test(m[1])) return { key: `/block/${Number(m[1])}`, ttl: 5, run: (rpc) => block(rpc, String(Number(m![1]))) };
@@ -113,8 +117,8 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
   if ("redirect" in r) { res.writeHead(301, { location: r.redirect, ...SECURITY }); res.end(); return true; }
   if (gated() && !verify(cookies(req).rhx)) { res.writeHead(303, { location: "/access", "cache-control": "no-store", ...SECURITY }); res.end(); return true; }
   // Pages render first and fill in after: the shell goes out at once, live.js asks the same URL again with x-rhx-fill and
-  // swaps its <main> in. The fragments live.js polls (/live, /hint) and error pages are served as they are.
-  if (!full && req.headers["x-rhx-fill"] !== "1" && r.key !== "/404" && r.key !== "/live" && !r.key.startsWith("/hint/")) {
+  // swaps its <main> in. The fragments live.js asks (/live, /hint, /charts) and error pages are served as they are.
+  if (!full && req.headers["x-rhx-fill"] !== "1" && r.key !== "/404" && r.key !== "/live" && !r.key.startsWith("/hint/") && !r.key.startsWith("/charts?")) {
     const src = url.pathname + url.search, nojs = `${src}${url.search ? "&" : "?"}full=1`;
     send(res, 200, "Loading", html`<div id="fill" data-src="${src}"><p class="muted">Loading…</p></div>
 <noscript><meta http-equiv="refresh" content="0;url=${nojs}"><p><a href="${nojs}">Open this page</a> (without JavaScript it loads in one go).</p></noscript>`,

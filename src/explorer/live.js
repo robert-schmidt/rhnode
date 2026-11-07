@@ -202,6 +202,26 @@ const feed = () => {
   charts();
   feed();
 })();
+// The chart range links swap the "Chain over time" section in place (/charts?range=, the section alone); the address
+// bar follows. Without this script they load the whole page.
+document.addEventListener("click", async (e) => {
+  const a = e.target instanceof Element && e.target.closest("#chain nav.seg a[href]");
+  if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const url = new URL(a.href), sec = document.getElementById("chain");
+  if (!sec) return;
+  e.preventDefault();
+  sec.classList.add("busy");
+  try {
+    const r = await fetch(`/charts${url.search}`, { cache: "no-store", credentials: "same-origin" });
+    const got = r.ok && !r.redirected && new DOMParser().parseFromString(await r.text(), "text/html").getElementById("chain");
+    if (!got) throw new Error(String(r.status));
+    sec.replaceWith(document.importNode(got, true));
+    history.replaceState(null, "", url.pathname + url.search + url.hash);
+    charts();
+  } catch {
+    location.href = a.href; // the whole page, as without the script
+  } finally { sec.classList.remove("busy"); }
+});
 // Copy links (data-copy: the access token in the footer and on /access); without the script the token text selects in one click.
 document.addEventListener("click", (e) => {
   const a = e.target instanceof Element && e.target.closest("[data-copy]");
