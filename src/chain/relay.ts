@@ -20,6 +20,7 @@ const amount = (data: string): bigint => (data && data !== "0x" ? BigInt(data) :
 const usdg = USDG.toLowerCase(), weth = WETH.toLowerCase();
 
 const SWAPS = new Set([SWAP_V2, SWAP_V3, SWAP_V4, SWAP_PANCAKE_V3, SWAP_METRIC, PONS_CURVE_BUY, PONS_CURVE_SELL].map((t) => t.toLowerCase()));
+const BURNS = new Set(["0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead"]);
 /** Addresses that emitted a swap log: pools (the v4 PoolManager for every v4 pool). */
 const swappers = (logs: Log[]) => new Set(logs.filter((l) => SWAPS.has(l.topics?.[0]?.toLowerCase())).map((l) => l.address.toLowerCase()));
 
@@ -34,13 +35,15 @@ export function fillOf(hash: string, logs: Log[], router: string = RELAY_ROUTER)
   const transfers = logs.filter((l) => l.topics?.[0]?.toLowerCase() === TRANSFER && l.topics.length >= 3);
   const paidBack = new Set(transfers.filter((l) => addr(l.topics[2]) === router && [usdg, weth].includes(l.address.toLowerCase())).map((l) => addr(l.topics[1])));
   for (const p of swappers(logs)) paidBack.add(p);
-  for (const l of transfers) {
+  for (const [i, l] of transfers.entries()) {
     const token = l.address.toLowerCase(), from = addr(l.topics[1]), to = addr(l.topics[2]);
     if (to === router && from !== router && !RELAY_CONTRACTS.has(from)) {
       if (token === usdg) usdgIn += amount(l.data);
       else if (token === weth) wethIn += amount(l.data);
     }
-    if (from === router && token !== usdg && token !== weth && !RELAY_CONTRACTS.has(to) && !paidBack.has(to) && amount(l.data) > 0n) out = l;
+    // not a buyer: the token contract itself (a tax token's fee leg), a burn, or a hop that sends the token on later
+    if (from === router && token !== usdg && token !== weth && to !== token && !BURNS.has(to) && !RELAY_CONTRACTS.has(to) && !paidBack.has(to)
+      && amount(l.data) > 0n && !transfers.some((m, j) => j > i && m.address.toLowerCase() === token && addr(m.topics[1]) === to)) out = l;
   }
   if (!out) return null;
   return { hash: hash.toLowerCase(), recipient: addr(out.topics[2]), token: out.address.toLowerCase(), raw: amount(out.data), usdgIn, wethIn,
@@ -70,7 +73,7 @@ export function proxyFillOf(hash: string, logs: Log[]): ChainFill | null {
       if (token === usdg) usdgIn += amount(l.data);
       else if (token === weth) wethIn += amount(l.data);
     }
-    if ((from === x || paid.has(from)) && token !== usdg && token !== weth && !RELAY_CONTRACTS.has(to) && !senders.has(to) && amount(l.data) > 0n) outs.push(l);
+    if ((from === x || paid.has(from)) && token !== usdg && token !== weth && to !== token && !BURNS.has(to) && !RELAY_CONTRACTS.has(to) && !senders.has(to) && amount(l.data) > 0n) outs.push(l);
   }
   if (!outs.length) return null;
   const tok = outs[outs.length - 1].address.toLowerCase();

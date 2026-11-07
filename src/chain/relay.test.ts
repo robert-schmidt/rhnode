@@ -73,3 +73,14 @@ test("fillOf on the v3.2 router: a sale into a v4 native-ETH pool is not a fill 
   const sellEth = (real as unknown as Record<string, { address: string; topics: string[]; data: string }[]>).sellEth;
   assert.equal(fillOf("0x4833", sellEth, RELAY_ROUTER_V32), null);
 });
+
+test("fillOf: a token sent to a hop that passes it on, to the token contract or to a burn is no buy", () => {
+  const HOP = "0x00000000000000000000000000000000000000ee";
+  const via = (to: string, more: { address: string; topics: string[]; data: string }[] = []) => fillOf("0x2", [
+    { address: TOKEN, topics: [TRANSFER, pad(SOLVER), pad(RELAY_ROUTER)], data: amt(9n) },
+    { address: TOKEN, topics: [TRANSFER, pad(RELAY_ROUTER), pad(to)], data: amt(9n) }, ...more]);
+  assert.equal(via(HOP, [{ address: TOKEN, topics: [TRANSFER, pad(HOP), pad(POOL)], data: amt(9n) }]), null);
+  assert.equal(via(TOKEN), null);
+  assert.equal(via("0x000000000000000000000000000000000000dead"), null);
+  assert.equal(via(BUYER)?.recipient, BUYER);
+});
