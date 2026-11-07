@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compact, html, JS_PATH, page, units } from "./html.ts";
+import { compact, html, JS_PATH, page, units, withToken } from "./html.ts";
 import { route } from "./index.ts";
 import { failState } from "./pages.ts";
 
@@ -86,4 +86,11 @@ test("the search hint route takes a whole lowercase address only", () => {
   const r = route("/hint/0x" + "ab".repeat(20), new URLSearchParams());
   assert.ok(r && "key" in r && r.key === "/hint/0x" + "ab".repeat(20));
   for (const p of ["/hint/0x" + "AB".repeat(20), "/hint/0x1234", "/hint/" + XSS]) assert.equal(route(p, new URLSearchParams()), null);
+});
+
+test("the footer shows the visitor's own token with a copy link, escaped, and nothing without one", () => {
+  const p = page("x", html``);
+  assert.ok(withToken(p, "me.1793360000.abc").includes('<span class="mono token">me.1793360000.abc</span> <a href="#" data-copy="me.1793360000.abc">copy</a>'));
+  assert.ok(withToken(p, '"><b>').includes("&quot;&gt;&lt;b&gt;") && !withToken(p, '"><b>').includes('"><b>'));
+  assert.ok(!withToken(p, null).includes("<!--rhx-->") && !withToken(p, null).includes("access token"));
 });

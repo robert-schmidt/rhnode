@@ -55,9 +55,14 @@ export function page(title: string, body: Html, opts: { q?: string; refresh?: nu
 <main>${body}</main>
 <footer>Robinhood Chain (4663), read from our own node and ClickHouse index. An independent explorer, not affiliated with Robinhood.
 ${cfg.explorer.credit ? html`<a href="${cfg.explorer.credit.url}" rel="noopener">${cfg.explorer.credit.text}</a> · ` : ""}Open source:
-<a href="${REPO}" rel="noopener">${REPO.replace("https://", "")}</a> · <a href="/access">access</a> · <a href="/health">status</a></footer>
+<a href="${REPO}" rel="noopener">${REPO.replace("https://", "")}</a> · <a href="/access">access</a> · <a href="/health">status</a><!--rhx--></footer>
 </body></html>`.s;
 }
+
+/** The visitor's own access token in the footer, with a copy link (live.js). Pages are cached for everyone, so it goes in
+ *  per request, from the visitor's cookie; "" takes the slot out. */
+export const withToken = (page: string, token: string | null) => page.replace("<!--rhx-->", () => token
+  ? html`<span class="tok">Your access token: <span class="mono token">${token}</span> <a href="#" data-copy="${token}">copy</a></span>`.s : "");
 
 // --- formatters (PURE) ---
 

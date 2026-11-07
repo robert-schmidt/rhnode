@@ -179,3 +179,10 @@
   document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
   timer = setTimeout(poll, POLL);
 })();
+// Copy links (data-copy: the access token in the footer and on /access); without the script the token text selects in one click.
+document.addEventListener("click", (e) => {
+  const a = e.target instanceof Element && e.target.closest("[data-copy]");
+  if (!a) return;
+  e.preventDefault();
+  navigator.clipboard?.writeText(a.dataset.copy).then(() => { a.textContent = "copied"; setTimeout(() => { a.textContent = "copy"; }, 1500); }, () => {});
+});

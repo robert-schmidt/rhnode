@@ -3,7 +3,7 @@
 // block or tx for a day, live pages for seconds) and concurrent misses for one page share one render. Each client IP
 // gets a token bucket for cache misses only, so a cached page costs nothing; nginx limits raw request rates in front.
 import type http from "node:http";
-import { CSS, CSS_PATH, FAVICON, html, JS, JS_PATH, LOGO, page, REPO, type Html } from "./html.ts";
+import { CSS, CSS_PATH, FAVICON, html, JS, JS_PATH, LOGO, page, REPO, withToken, type Html } from "./html.ts";
 import { challenge, claim, CODE_PREFIX, codeOf, gated, mint, REPO_NAME, verify } from "./gate.ts";
 import { cfg } from "../config.ts";
 import { address, block, hint, home, live, notFound, search, tx, type Page, type Rpc } from "./pages.ts";
@@ -130,11 +130,12 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
     }
   }
   if (out.redirect) { res.writeHead(302, { location: out.redirect, "cache-control": "no-store", ...SECURITY }); res.end(); return true; }
+  const body = withToken(out.body, gated() ? cookies(req).rhx : null); // verified above
   res.writeHead(out.status, {
-    "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(out.body),
+    "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body),
     "cache-control": `${gated() ? "private" : "public"}, ${out.ttl >= IMMUTABLE_S ? "max-age=86400, immutable" : `max-age=${Math.min(out.ttl, 60)}`}`, ...SECURITY,
   });
-  res.end(req.method === "HEAD" ? undefined : out.body);
+  res.end(req.method === "HEAD" ? undefined : body);
   return true;
 }
 
@@ -146,8 +147,8 @@ const cookies = (req: http.IncomingMessage) => Object.fromEntries((req.headers.c
 const cookie = (name: string, v: string, maxAge: number) => `${name}=${v}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 const YEAR = 31_536_000;
 
-function send(res: http.ServerResponse, status: number, title: string, body: Html, setCookies: string[] = []) {
-  const s = page(title, body);
+function send(res: http.ServerResponse, status: number, title: string, body: Html, setCookies: string[] = [], token: string | null = null) {
+  const s = withToken(page(title, body), token);
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...(setCookies.length ? { "set-cookie": setCookies } : {}), ...SECURITY });
   res.end(s);
 }
@@ -163,7 +164,7 @@ function accessPage(code: string, o: { error?: string; token?: string; login?: s
 ${o.error ? html`<p class="bad">${o.error}</p>` : ""}
 ${o.token ? html`<div class="note"><p class="ok">Welcome, @${o.login}: this browser has access now.</p>
 <p>Your token, for other browsers and devices. Keep it private: it is tied to your GitHub account.</p>
-<p class="mono wrap token">${o.token}</p><p><a href="/">Open the explorer →</a></p></div>`
+<p><span class="mono wrap token">${o.token}</span> <a href="#" data-copy="${o.token}">copy</a></p><p><a href="/">Open the explorer →</a></p></div>`
     : o.login ? html`<p class="ok">This browser has access (@${o.login}). <a href="/">Open the explorer →</a></p>` : ""}
 <p>The explorer is free: Robinhood Chain read straight from our own node and index. Access tokens keep it fast for everyone.</p>
 ${o.login || o.token ? "" : html`<p class="muted small">Why sign in? It costs nothing but two clicks${cfg.explorer.requireStar ? " (a star and an issue)" : ""}. ${cfg.explorer.requireStar ? "Stars help this open-source project get noticed, and keeping" : "Keeping"} the explorer behind a light gate rather than fully public keeps it fast for everyone who uses it.</p>`}
@@ -185,7 +186,7 @@ async function access(req: http.IncomingMessage, res: http.ServerResponse, url: 
   let code = codeOf(c.rhc);
   const fresh = !code;
   if (!code) { const ch = challenge(); code = ch.code; set.push(cookie("rhc", ch.cookie, 86400)); }
-  if (req.method === "GET" || req.method === "HEAD") return send(res, 200, "Access", accessPage(code, { login: verify(c.rhx) }), set);
+  if (req.method === "GET" || req.method === "HEAD") return send(res, 200, "Access", accessPage(code, { login: verify(c.rhx) }), set, verify(c.rhx) ? c.rhx : null);
   if (req.method !== "POST" || url.pathname === "/access") { res.writeHead(405, { allow: "GET, POST" }); res.end(); return; }
   if (!allow(ipOf(req))) { res.writeHead(429, { "content-type": "text/plain", "retry-after": "2", ...SECURITY }); res.end("Too many requests: slow down a little.\n"); return; }
   let f: URLSearchParams;
