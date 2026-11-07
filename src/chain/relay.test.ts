@@ -68,3 +68,8 @@ test("proxyFillOf: a WETH-only delivery (bridged ETH) is no token buy", () => {
 test("fillOf on the routers misses all four proxy fills (why proxyFillOf exists)", () => {
   for (const k of Object.keys(px)) for (const r of [RELAY_ROUTER_V32, RELAY_ROUTER]) assert.equal(fillOf(px[k].hash, px[k].logs, r), null);
 });
+
+test("fillOf on the v3.2 router: a sale into a v4 native-ETH pool is not a fill (the PoolManager is no buyer)", () => {
+  const sellEth = (real as unknown as Record<string, { address: string; topics: string[]; data: string }[]>).sellEth;
+  assert.equal(fillOf("0x4833", sellEth, RELAY_ROUTER_V32), null);
+});

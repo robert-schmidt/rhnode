@@ -4,7 +4,10 @@
 // 2. The v3.2 router also routes smart-wallet SELLS (token in from the user, sold into a pool, stable back).
 //    The old rule read the token leaving for the pool as a buy by the pool. A token sent to an address
 //    that paid USDG/WETH back to the router in the same tx is a sale into that pool, not a delivery.
+//    A v4 pool paying native ETH logs no Transfer back (18.5K fills named the PoolManager as the buyer,
+//    2026-11-07), so an address that emitted a swap log in the tx is a pool too, never a buyer.
 import { RELAY_CONTRACTS, USDG, WETH } from "./constants.ts";
+import { PONS_CURVE_BUY, PONS_CURVE_SELL, SWAP_METRIC, SWAP_PANCAKE_V3, SWAP_V2, SWAP_V3, SWAP_V4 } from "./swaplog.ts";
 
 export const RELAY_ROUTER = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f"; // RelayRouterV3 — it hands the bought token to the buyer
 /** v3.2 router: found in our ingested txs 2026-10-29 (189 router txs in ~3 min vs 1 on V3); a 7,185-byte contract. */
@@ -16,6 +19,10 @@ const addr = (topic: string) => `0x${topic.slice(-40).toLowerCase()}`;
 const amount = (data: string): bigint => (data && data !== "0x" ? BigInt(data) : 0n);
 const usdg = USDG.toLowerCase(), weth = WETH.toLowerCase();
 
+const SWAPS = new Set([SWAP_V2, SWAP_V3, SWAP_V4, SWAP_PANCAKE_V3, SWAP_METRIC, PONS_CURVE_BUY, PONS_CURVE_SELL].map((t) => t.toLowerCase()));
+/** Addresses that emitted a swap log: pools (the v4 PoolManager for every v4 pool). */
+const swappers = (logs: Log[]) => new Set(logs.filter((l) => SWAPS.has(l.topics?.[0]?.toLowerCase())).map((l) => l.address.toLowerCase()));
+
 type Log = { address: string; topics: string[]; data: string; transactionHash?: string; blockNumber?: string };
 export type ChainFill = { hash: string; recipient: string; token: string; raw: bigint; usdgIn: bigint; wethIn: bigint; block: number | null };
 
@@ -26,6 +33,7 @@ export function fillOf(hash: string, logs: Log[], router: string = RELAY_ROUTER)
   let out: Log | null = null, usdgIn = 0n, wethIn = 0n;
   const transfers = logs.filter((l) => l.topics?.[0]?.toLowerCase() === TRANSFER && l.topics.length >= 3);
   const paidBack = new Set(transfers.filter((l) => addr(l.topics[2]) === router && [usdg, weth].includes(l.address.toLowerCase())).map((l) => addr(l.topics[1])));
+  for (const p of swappers(logs)) paidBack.add(p);
   for (const l of transfers) {
     const token = l.address.toLowerCase(), from = addr(l.topics[1]), to = addr(l.topics[2]);
     if (to === router && from !== router && !RELAY_CONTRACTS.has(from)) {
@@ -53,7 +61,7 @@ export function proxyFillOf(hash: string, logs: Log[]): ChainFill | null {
   const x = RELAY_EXECUTOR, transfers = logs.filter((l) => l.topics?.[0]?.toLowerCase() === TRANSFER && l.topics.length >= 3);
   // not the zero address: WETH minted to the executor and burned again to pay an ETH pool is still the solver's money
   const paid = new Set(transfers.filter((l) => addr(l.topics[1]) === x && !/^0x0{40}$/.test(addr(l.topics[2]))).map((l) => addr(l.topics[2])));
-  const senders = new Set(transfers.map((l) => addr(l.topics[1])));
+  const senders = new Set([...transfers.map((l) => addr(l.topics[1])), ...swappers(logs)]);
   let usdgIn = 0n, wethIn = 0n;
   const outs: Log[] = [];
   for (const l of transfers) {
