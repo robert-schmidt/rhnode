@@ -105,11 +105,22 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
     res.end(FAVICON.body); return true;
   }
   if (/^\/access(\/claim|\/token)?$/.test(url.pathname)) { await access(req, res, url); return true; }
+  const full = url.searchParams.has("full"); // without JavaScript: the whole page at once (the shell's <noscript> sends here)
+  url.searchParams.delete("full");
   const r = route(url.pathname, url.searchParams);
   if (!r) return false;
   if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405, { allow: "GET, HEAD" }); res.end(); return true; }
   if ("redirect" in r) { res.writeHead(301, { location: r.redirect, ...SECURITY }); res.end(); return true; }
   if (gated() && !verify(cookies(req).rhx)) { res.writeHead(303, { location: "/access", "cache-control": "no-store", ...SECURITY }); res.end(); return true; }
+  // Pages render first and fill in after: the shell goes out at once, live.js asks the same URL again with x-rhx-fill and
+  // swaps its <main> in. The fragments live.js polls (/live, /hint) and error pages are served as they are.
+  if (!full && req.headers["x-rhx-fill"] !== "1" && r.key !== "/404" && r.key !== "/live" && !r.key.startsWith("/hint/")) {
+    const src = url.pathname + url.search, nojs = `${src}${url.search ? "&" : "?"}full=1`;
+    send(res, 200, "Loading", html`<div id="fill" data-src="${src}"><p class="muted">Loading…</p></div>
+<noscript><meta http-equiv="refresh" content="0;url=${nojs}"><p><a href="${nojs}">Open this page</a> (without JavaScript it loads in one go).</p></noscript>`,
+      [], gated() ? cookies(req).rhx : null);
+    return true;
+  }
 
   let out: Out | undefined;
   const hit = cache.get(r.key);
@@ -132,7 +143,7 @@ export async function explorer(req: http.IncomingMessage, res: http.ServerRespon
   if (out.redirect) { res.writeHead(302, { location: out.redirect, "cache-control": "no-store", ...SECURITY }); res.end(); return true; }
   const body = withToken(out.body, gated() ? cookies(req).rhx : null); // verified above
   res.writeHead(out.status, {
-    "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body),
+    "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body), vary: "x-rhx-fill",
     "cache-control": `${gated() ? "private" : "public"}, ${out.ttl >= IMMUTABLE_S ? "max-age=86400, immutable" : `max-age=${Math.min(out.ttl, 60)}`}`, ...SECURITY,
   });
   res.end(req.method === "HEAD" ? undefined : body);

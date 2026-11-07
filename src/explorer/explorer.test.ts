@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { compact, html, JS_PATH, page, units, withToken } from "./html.ts";
-import { route } from "./index.ts";
+import { explorer, route } from "./index.ts";
 import { failState } from "./pages.ts";
 
 const XSS = `"><script>alert(1)</script><img src=x onerror=alert(1)>`;
@@ -93,4 +93,17 @@ test("the footer shows the visitor's own token with a copy link, escaped, and no
   assert.ok(withToken(p, "me.1793360000.abc").includes('<span class="mono token">me.1793360000.abc</span> <a href="#" data-copy="me.1793360000.abc">copy</a>'));
   assert.ok(withToken(p, '"><b>').includes("&quot;&gt;&lt;b&gt;") && !withToken(p, '"><b>').includes('"><b>'));
   assert.ok(!withToken(p, null).includes("<!--rhx-->") && !withToken(p, null).includes("access token"));
+});
+
+test("a page comes as a shell that fills itself in; /live and /hint come as they are", async () => {
+  const http = await import("node:http"), { cfg } = await import("../config.ts"), was = cfg.explorer.secret;
+  (cfg.explorer as { secret: string }).secret = ""; // ungated: earlier tests set a secret
+  const srv = http.createServer((req, res) => void explorer(req, res, new URL(req.url!, "http://x"), null as never)).listen(0);
+  const port = (srv.address() as { port: number }).port, get = (p: string) => fetch(`http://127.0.0.1:${port}${p}`).then((r) => r.text());
+  try {
+    const shell = await get("/block/5?x=1");
+    assert.ok(shell.includes('<div id="fill" data-src="/block/5?x=1">') && shell.includes('content="0;url=/block/5?x=1&amp;full=1"'));
+    assert.ok((await get("/")).includes('data-src="/"') && (await get("/")).includes("url=/?full=1"));
+    assert.ok(!(await get("/block/nope")).includes('id="fill"')); // the 404 page, at once
+  } finally { srv.close(); (cfg.explorer as { secret: string }).secret = was; }
 });

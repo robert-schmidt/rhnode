@@ -1,6 +1,6 @@
 // The home page's live feed: polls /live every 5 s (server-rendered rows, cached 1 s for everyone) and feeds rows newer than the
 // ones it shows (data-o: block, or block and tx index) in at the top, spread over the poll interval so the list moves like the chain does. Pointing at a list (or focusing
-// into it) pauses it; a hidden tab or an idle visitor doesn't poll, and coming back shows the current rows at once. Without this script the page refreshes itself (<noscript>).
+// into it) pauses it; a hidden tab or an idle visitor doesn't poll, and coming back shows the current rows at once. Without this script, pages load in one go (?full=1, from the shell's <noscript>).
 "use strict";
 // The search box: what the text is (a block, a tx, an address, a token's name) as it's typed or pasted, in a box under it.
 // Only an address asks the server (/hint/<address>, cached 60 s), whether it's a token, a contract or a wallet.
@@ -46,7 +46,7 @@
 
 // Chain charts (charts.ts): a crosshair and readout at the nearest point on hover, or on keyboard focus with the arrow
 // keys. Values go in with textContent; the table under each chart has them all without this.
-(() => {
+const charts = () => {
   for (const svg of document.querySelectorAll("svg[data-pts]")) {
     let pts;
     try { pts = JSON.parse(svg.dataset.pts); } catch { continue; }
@@ -81,9 +81,9 @@
       show(at + (e.key === "ArrowRight" ? 1 : -1));
     });
   }
-})();
+};
 
-(() => {
+const feed = () => {
   // The home page arrives without its lists; the first /live poll, right away, puts them in. Then one /live poll every 5 s while the tab is visible and someone is there (no input for IDLE: polling stops until
   // they move). Each poll's new rows drip in over the next 5 s, newest ending on top; whatever is still queued when the
   // next poll lands goes in at once, so the list is never more than one poll behind. After a gap (hidden tab, sleep,
@@ -178,6 +178,29 @@
   setInterval(() => { if (!idle && Date.now() - seen > IDLE) { idle = true; clearTimeout(timer); timer = 0; lists.forEach(show); } }, 30_000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
   poll(); // the page comes without its lists (pages.ts home): fetch them now
+};
+// Pages come as a shell and fill in after (index.ts): the same URL again with x-rhx-fill, whose <main> goes in here, then
+// the charts and the live feed start on it. A redirect (search, an old link) moves the address bar along.
+(async () => {
+  const fill = document.getElementById("fill");
+  if (fill) {
+    try {
+      const r = await fetch(fill.dataset.src, { headers: { "x-rhx-fill": "1" }, cache: "no-store", credentials: "same-origin" });
+      const doc = new DOMParser().parseFromString(await r.text(), "text/html"), main = doc.querySelector("main");
+      if (!main) throw new Error(String(r.status));
+      if (r.redirected) history.replaceState(null, "", r.url);
+      document.title = doc.title;
+      document.querySelector("main").replaceWith(document.importNode(main, true));
+      const re = doc.querySelector("head > meta[http-equiv=refresh]"); // a page that refreshes itself (an address still indexing)
+      if (re) setTimeout(() => location.reload(), (parseInt(re.content, 10) || 60) * 1000);
+      if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+    } catch {
+      fill.replaceChildren(Object.assign(document.createElement("p"), { className: "bad", textContent: "This page didn't load. Try again in a moment." }));
+      return;
+    }
+  }
+  charts();
+  feed();
 })();
 // Copy links (data-copy: the access token in the footer and on /access); without the script the token text selects in one click.
 document.addEventListener("click", (e) => {
