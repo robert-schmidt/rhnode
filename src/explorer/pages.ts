@@ -153,7 +153,9 @@ async function latest(rpc: Rpc) {
     methods(rpc, txs.map((t) => ({ to: t.to || null, input: t.created ? "" : t.selector }))),
     rows<{ tx_hash: string; token: string; amt: string; standard: string }>(
       `SELECT tx_hash, token, toString(amount) AS amt, standard FROM ev_transfers
-       WHERE block > {lo:UInt64} AND tx_hash IN {h:Array(String)} AND sign = 1 ORDER BY log_index`, { lo: head - 60, h: txs.map((t) => t.hash) }),
+       WHERE block > {lo:UInt64} AND time >= toDateTime({t:UInt32}) AND tx_hash IN {h:Array(String)} AND sign = 1 ORDER BY log_index`, // time: the
+      // parts' time ranges skip all but the newest (sorted by token, the block can't): ~1 s and 23M rows before (2026-11-07)
+      { lo: head - 60, t: Math.min(Math.floor(Date.now() / 1000), ...txs.map((t) => t.ts)) - 1, h: txs.map((t) => t.hash) }),
   ]);
   const meta = await tokens(mv.map((m) => m.token));
   const movesBy = new Map<string, Move[]>();
