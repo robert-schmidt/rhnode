@@ -84,7 +84,7 @@
 })();
 
 (() => {
-  // One /live poll every 5 s while the tab is visible and someone is there (no input for IDLE: polling stops until
+  // The home page arrives without its lists; the first /live poll, right away, puts them in. Then one /live poll every 5 s while the tab is visible and someone is there (no input for IDLE: polling stops until
   // they move). Each poll's new rows drip in over the next 5 s, newest ending on top; whatever is still queued when the
   // next poll lands goes in at once, so the list is never more than one poll behind. After a gap (hidden tab, sleep,
   // idle, failed polls) the lists are replaced with the current rows instead of replaying what was missed.
@@ -93,7 +93,7 @@
   const tiles = document.getElementById("tiles"), net = document.getElementById("net");
   if (!lists.every((l) => l.el) || !tiles) return;
   document.documentElement.classList.add("js");
-  let off = false, idle = false, busy = false, seen = Date.now(), lastOk = Date.now(), timer = 0;
+  let off = false, idle = false, busy = false, seen = Date.now(), lastOk = 0, timer = 0; // lastOk 0: the first poll fills the lists at once
   // each list's badge: Paused while pointed at (that list only) or idle, Reconnecting while /live fails, else Live
   const show = (l) => {
     if (!l.badge) return;
@@ -148,7 +148,7 @@
         const got = doc.getElementById(l.el.id);
         if (!got) throw new Error("no rows");
         const rows = [...got.children].map((c) => document.importNode(c, true)); // newest first
-        if (gap && !l.held) { // back after a gap: the current rows, at once
+        if ((gap && !l.held) || !l.el.querySelector("[data-o]")) { // the page's first rows, or back after a gap: the current rows, at once
           l.queue = [];
           rows.slice(0, KEEP).forEach(tick);
           l.el.replaceChildren(...rows.slice(0, KEEP));
@@ -167,7 +167,7 @@
     }
     busy = false;
     lists.forEach(show);
-    if (!document.hidden && !idle) timer = setTimeout(poll, off ? Math.min(30_000, 2 * POLL + (Date.now() - lastOk)) : POLL);
+    if (!document.hidden && !idle) timer = setTimeout(poll, off ? (lastOk ? Math.min(30_000, 2 * POLL + (Date.now() - lastOk)) : 2 * POLL) : POLL);
   };
   const wake = () => {
     seen = Date.now();
@@ -177,7 +177,7 @@
   for (const e of ["pointermove", "pointerdown", "keydown", "scroll", "touchstart"]) addEventListener(e, () => { seen = Date.now(); if (idle) wake(); }, { passive: true });
   setInterval(() => { if (!idle && Date.now() - seen > IDLE) { idle = true; clearTimeout(timer); timer = 0; lists.forEach(show); } }, 30_000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
-  timer = setTimeout(poll, POLL);
+  poll(); // the page comes without its lists (pages.ts home): fetch them now
 })();
 // Copy links (data-copy: the access token in the footer and on /access); without the script the token text selects in one click.
 document.addEventListener("click", (e) => {

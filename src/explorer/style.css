@@ -65,6 +65,7 @@ h2 .live { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px
 .feed { overflow-anchor: none; list-style: none; margin: 0; padding: 0; background: var(--card); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .feed li { display: grid; gap: 4px 14px; align-items: center; min-height: 56px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .feed li:last-child { border-bottom: 0; }
+.feed li.ph { display: block; }
 .feed li > div { min-width: 0; }
 .feed .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .feed .num { text-align: right; font-variant-numeric: tabular-nums; }

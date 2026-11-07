@@ -183,14 +183,17 @@ function glance(wei: bigint, ms: Move[], meta: Map<string, Token>): Html {
 const LIVE = html`<span class="live" hidden><i></i><span>Live</span></span>`; // live.js shows it, per list
 const liveTiles = (head: number, net: Stats) => html`<div><b>${link("block", head)}</b><span>latest block</span></div>${net.tiles}`;
 
-export async function home(rpc: Rpc, range: Range = "7d"): Promise<Page> {
-  const [{ head, blockRows, txRows, net }, charts] = await Promise.all([latest(rpc), chainCharts(range)]);
-  return { status: 200, title: "Latest blocks and transactions", refresh: 10, live: true, body: html`
+export async function home(_rpc: Rpc, range: Range = "7d"): Promise<Page> {
+  // The lists, tiles and Network table come from /live after the page is up (live.js asks at once): the page waits only
+  // for the charts, whose stale copy answers at once (charts.ts). Building the lists in the page held it 0.2-3 s (2026-11-07).
+  const charts = await chainCharts(range);
+  const wait = html`<li class="ph muted">Loading…<noscript> (the live lists need JavaScript)</noscript></li>`;
+  return { status: 200, title: "Latest blocks and transactions", live: true, body: html`
 <h1>Robinhood Chain</h1>
-<div class="stats" id="tiles">${liveTiles(head, net)}</div>
-<div class="cols"><section><h2>Latest blocks ${LIVE}</h2><ol class="feed blocks" id="blocks">${blockRows.slice(0, 15)}</ol></section>
-<section><h2>Latest transactions ${LIVE}</h2><ol class="feed txs" id="txs">${txRows}</ol></section></div>
-<div id="net">${net.table}</div>
+<div class="stats" id="tiles"><div><b>…</b><span>latest block</span></div></div>
+<div class="cols"><section><h2>Latest blocks ${LIVE}</h2><ol class="feed blocks" id="blocks">${wait}</ol></section>
+<section><h2>Latest transactions ${LIVE}</h2><ol class="feed txs" id="txs">${wait}</ol></section></div>
+<div id="net"></div>
 ${charts}
 <p class="muted small" id="hint">New blocks and transactions come in at the top; pointing at a list pauses it. Failed transactions are dimmed.</p>` };
 }
