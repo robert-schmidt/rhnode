@@ -70,13 +70,16 @@ export function failState(f5: number, n5: number, f24: number): { level: "normal
   return { level: f5 > 0.5 ? "degraded" : ratio >= 1.5 ? "elevated" : "normal", ratio };
 }
 type Stats = { table: Html; tiles: Html };
-let statsMemo: { at: number; p: Promise<Stats> } | null = null;
+// A stale copy (up to an hour; live.js's next poll brings the new one) answers at once while the next is computed:
+// the recompute took 1-3.5 s of the page's time (2026-11-07).
+const statsMemo: { at: number; v?: Stats; p?: Promise<Stats> } = { at: 0 };
 function stats(): Promise<Stats> {
-  if (!statsMemo || Date.now() - statsMemo.at > 15_000) {
-    statsMemo = { at: Date.now(), p: computeStats() };
-    statsMemo.p.catch(() => { statsMemo = null; });
+  const m = statsMemo, age = Date.now() - m.at;
+  if (age > 15_000 && !m.p) {
+    m.p = computeStats().then((v) => { m.v = v; m.at = Date.now(); return v; });
+    m.p.catch(() => {}).finally(() => { m.p = undefined; });
   }
-  return statsMemo.p;
+  return m.v && age < 3_600_000 ? Promise.resolve(m.v) : m.p!;
 }
 async function computeStats(): Promise<Stats> {
   const T1 = "(SELECT max(time) FROM raw_blocks WHERE time > now() - INTERVAL 1 HOUR)";

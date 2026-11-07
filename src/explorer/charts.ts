@@ -25,15 +25,18 @@ async function load(range: Range): Promise<{ step: number; b: Bucket[] }> {
   })) };
 }
 
-const memo = new Map<Range, { at: number; p: Promise<Html> }>();
-/** The charts for a range, rebuilt at most every 5 minutes (the hour in progress moves; older ones don't). */
+const memo = new Map<Range, { at: number; v?: Html; p?: Promise<Html> }>();
+/** The charts for a range, rebuilt at most every 5 minutes (the hour in progress moves; older ones don't). A stale copy
+ *  (up to a day) answers at once while the rebuild runs: the 7-day read took ~11 s (2026-11-07), and the page waited for it. */
 export function chainCharts(range: Range): Promise<Html> {
-  const m = memo.get(range);
-  if (m && Date.now() - m.at < 300_000) return m.p;
-  const p = load(range).then(({ step, b }) => render(range, step, b));
-  memo.set(range, { at: Date.now(), p });
-  p.catch(() => memo.delete(range));
-  return p;
+  const m = memo.get(range) ?? { at: 0 };
+  memo.set(range, m);
+  const age = Date.now() - m.at;
+  if (age >= 300_000 && !m.p) {
+    m.p = load(range).then(({ step, b }) => { m.v = render(range, step, b); m.at = Date.now(); return m.v; });
+    m.p.catch(() => {}).finally(() => { m.p = undefined; });
+  }
+  return m.v !== undefined && age < 86_400_000 ? Promise.resolve(m.v) : m.p!;
 }
 
 // --- drawing ---
