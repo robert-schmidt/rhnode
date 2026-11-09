@@ -15,7 +15,7 @@ set -eu
 cd "$(dirname "$0")/.."
 conf() { grep -s "^$1=" .env | cut -d= -f2-; }
 DIR=$(conf BACKUP_DIR); DIR=${DIR:-/srv/rhnode-backups}
-KEEP=$(conf BACKUP_KEEP); KEEP=${KEEP:-7}
+KEEP=$(conf BACKUP_KEEP); KEEP=${KEEP:-1}
 TABLES=$(conf BACKUP_TABLES); TABLES=${TABLES:-creations,curve_payouts,kept_native,token_origin,token_markets,labels,contracts,pools,serve_tokens,agg_candles_1m,agg_wallet_token,kept_trades,kept_launches,kept_pools}
 SSH=$(conf BACKUP_SSH); PORT=$(conf BACKUP_SSH_PORT); PORT=${PORT:-22}
 KEY=$(conf BACKUP_SSH_KEY); KEY=${KEY:-/root/.ssh/rhnode-backup}

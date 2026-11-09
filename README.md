@@ -141,7 +141,7 @@ Exactness for API consumers: `serve_tokens.complete`, the raw window (`raw_block
   ```
 - **Backups:** `ops/rhnode-backup.timer` runs `ops/backup.sh` nightly. It dumps only what the node can't give back (tables
   from tip traces, `ctl_*` state, small slow-to-recompute tables: ~400 MB, 40 s), keeps the newest `BACKUP_KEEP`
-  here (7; 1 is enough with uploads), and uploads each one to `BACKUP_SSH` if set: there `ops/backup-recv.sh` lets that key only add files and keeps the newest 7.
+  here (default 1), and uploads each one to `BACKUP_SSH` if set: there `ops/backup-recv.sh` lets that key only add files and keeps the newest 1.
   Everything else is rebuilt from the node by the history pass.
   Restore (pull the dump back from the backup box first) with `sudo sh ops/restore.sh /srv/rhnode-backups/<dump>`: it verifies the checksums, loads tables that are empty
   or missing, and compares row counts (`--replace` overwrites, `--db name` restores into a scratch database). On a fresh
