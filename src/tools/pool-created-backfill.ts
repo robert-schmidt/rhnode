@@ -2,6 +2,8 @@
 // rows came from a lookup with created_block 0. Our node's logs of those factories (any event: a factory emits little else)
 // are matched against the pools in their data or topics, and each found pool's row is rewritten with the block and the
 // event-level version (migration 041). Idempotent. `node src/tools/pool-created-backfill.ts <from> <to> [--dry]` (NITRO_HTTP)
+// Nitro first: a 140-address getLogs over 50K blocks took ~10 s and, back to back, left Nitro 247 blocks behind (2026-11-11),
+// so each step waits until Nitro's latest block is under MAX_AGE_S old, and rests as long as the step took.
 import { insert, rows, workload } from "../ch.ts";
 
 const node = process.env.NITRO_HTTP;
@@ -10,6 +12,7 @@ const [from, to] = [Number(process.argv[2]), Number(process.argv[3])];
 if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from > to) throw new Error("usage: pool-created-backfill.ts <from> <to> [--dry]");
 const DRY = process.argv.includes("--dry"), STEP = Number(process.env.STEP ?? 200_000), EVENT_VERSION = 2n ** 41n;
 const hex = (n: number) => "0x" + n.toString(16);
+const MAX_AGE_S = 5, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type Log = { address: string; topics: string[]; data: string; blockNumber: string; blockTimestamp?: string };
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
@@ -27,6 +30,11 @@ async function main() {
   console.log(`${zero.size} pools of ${factories.length} factories have no creation block`);
   let found = 0;
   for (let b = from; b <= to && zero.size; b += STEP) {
+    for (;;) {
+      const { timestamp } = await rpc<{ timestamp: string }>("eth_getBlockByNumber", ["latest", false]);
+      if (Date.now() / 1000 - Number(timestamp) <= MAX_AGE_S) break;
+      await sleep(10_000);
+    }
     const hi = Math.min(to, b + STEP - 1), t0 = Date.now();
     const logs = await rpc<Log[]>("eth_getLogs", [{ address: factories, fromBlock: hex(b), toBlock: hex(hi) }]);
     const out: object[] = [];
@@ -45,6 +53,7 @@ async function main() {
     if (!DRY) await insert("pools", out, `pool-created-backfill:${b}-${hi}`);
     found += out.length;
     console.log(JSON.stringify({ from: b, to: hi, logs: logs.length, found: out.length, left: zero.size, ms: Date.now() - t0, dry: DRY }));
+    await sleep(Date.now() - t0);
   }
   console.log(`done: ${found} pools got a creation block, ${zero.size} still have none`);
 }
