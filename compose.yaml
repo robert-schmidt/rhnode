@@ -10,6 +10,9 @@ services:
     image: clickhouse/clickhouse-server:26.3
     restart: unless-stopped
     cpu_shares: 2048
+    # A hard cap (0 = none). On the node box (8 threads, 20 W) uncapped ClickHouse took ~5.5 cores during a chain burst and
+    # Nitro fell 1,215 behind (2026-11-05); 3.5 has held since then (set live with `docker update --cpus`, now here).
+    cpus: ${CH_CPUS:-0}
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-rhnode}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
