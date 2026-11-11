@@ -11,6 +11,7 @@
 import { decodeEventLog, parseAbiItem, toEventSelector, type AbiEvent } from "viem";
 import {
   BAGS_FACTORY,
+  BAGS_FACTORY_V2,
   BAGS_V4_HOOK,
   FLAP_PORTAL,
   HOODFUN_LAUNCHPAD,
@@ -19,10 +20,13 @@ import {
   PONS_V2_FACTORY,
   PONS_V2_MEME_HOOK,
   QUOTE_ASSETS,
+  TRADERBOOK_PAD,
   UERC20_FACTORY,
   UNIV2_FACTORY,
   UNIV3_FACTORY,
   UNIV4_POOL_MANAGER,
+  V3LAUNCH_FACTORY,
+  WETH,
   lc,
 } from "./constants.ts";
 
@@ -228,6 +232,66 @@ const entries: Entry[] = [
       symbol: String(a.symbol ?? ""),
       metadataUri: String(a.metadataURI ?? ""),
     }),
+  },
+
+  // Bags' second factory: a different TokenCreated (quote token, fees, threshold; no poolId to trust: the graduation pool comes
+  // from the trades). Added 2026-11-11, checked on live fixtures.
+  {
+    key: "bags2:TokenCreated",
+    address: BAGS_FACTORY_V2,
+    topic0: "0x7abc18474707e0197bbf0490f17efabb6cb1080b3aad906fc0e33d533b3f30b9",
+    abi: parseAbiItem(
+      "event TokenCreated(address indexed token, address indexed creator, address indexed quoteToken, address curve, address feeShare, address partner, bytes32 poolId, uint256 graduationThreshold, (uint16,uint16,uint16,uint16) fees, uint16 partnerFeeBps, string name, string symbol, string metadataURI)",
+    ) as AbiEvent,
+    observed: "signature matched by hashing (no verified source), decoded on live logs 2026-10-31",
+    normalize: (a) => ({
+      kind: "launch",
+      source: "bags",
+      token: s(a.token),
+      deployer: s(a.creator),
+      curve: s(a.curve),
+      pairToken: s(a.quoteToken),
+      graduationThreshold: String(a.graduationThreshold),
+      name: String(a.name ?? ""),
+      symbol: String(a.symbol ?? ""),
+      metadataUri: String(a.metadataURI ?? ""),
+    }),
+  },
+
+  // ── V3LaunchFactory (2026-11-05): straight into a locked 1% v3 WETH pool, like Pons v1 ──
+  {
+    key: "v3launch:TokenLaunched",
+    address: V3LAUNCH_FACTORY,
+    topic0: "0xf260e22fc69ce7c0587f86d0a7f8d73e13a320b3da348784aca10f5b7439d522",
+    abi: parseAbiItem(
+      "event TokenLaunched(address indexed token, address indexed deployer, address indexed creatorFeeRecipient, uint256 configId, uint16 feeBps, address rewardAsset, address pool, uint256 positionId, int24 floorTick)",
+    ) as AbiEvent,
+    observed: "live factory log 2026-11-05 (SMOKE3, fixtures); ABI from the verified V3LaunchFactory",
+    normalize: (a) => ({ kind: "launch", source: "v3launch", token: s(a.token), deployer: s(a.deployer), pool: s(a.pool), poolKind: "v3", pairToken: WETH }),
+  },
+
+  // ── Trader Book (TraderBookPadV2, public 2026-11-07): a curve inside the pad, then BookBonded into a locked pool. The v3
+  // locker names its pool; the v4 locker's "pool" is the PoolManager, so a v4 bond leaves the pool to the trades. ──
+  {
+    key: "traderbook:BookOpened",
+    address: TRADERBOOK_PAD,
+    topic0: "0xc527dfbca117554b6203bf1e6687462f4cbfc35c8d6aac791f6a5ff9a63c0c2a",
+    abi: parseAbiItem(
+      "event BookOpened(uint256 indexed bookId, address indexed token, address indexed quote, address tba, address creator, uint8 venue, address hook, uint256 vEth, uint256 vToken, uint256 gradQuote, uint64 antiSnipeEndsAt, uint64 minBondAt, uint64 deadline)",
+    ) as AbiEvent,
+    observed: "live pad log 2026-11-07 (MAXLEV, Book 1, fixtures); ABI from the verified TraderBookPadV2",
+    normalize: (a) => ({ kind: "launch", source: "traderbook", token: s(a.token), deployer: s(a.creator), pairToken: s(a.quote), curve: TRADERBOOK_PAD, graduationThreshold: String(a.gradQuote) }),
+  },
+  {
+    key: "traderbook:BookBonded",
+    address: TRADERBOOK_PAD,
+    topic0: "0xc5205a294d9bf09180c5053a471fd63a1807d259a9cec7b0a15515392d258d7c",
+    abi: parseAbiItem("event BookBonded(uint256 indexed bookId, address indexed token, address bonder, uint256 raise, uint256 lockId, address pool)") as AbiEvent,
+    observed: "live pad log 2026-11-07 (MAXLEV bonded into v3 0x56b779be…, fixtures)",
+    // ponytail: no v4 bond seen yet; when one is, check the locker really returns the PoolManager.
+    normalize: (a) => s(a.pool) === UNIV4_POOL_MANAGER
+      ? { kind: "migration", source: "traderbook", token: s(a.token), poolKind: "v4" }
+      : { kind: "migration", source: "traderbook", token: s(a.token), pool: s(a.pool), poolKind: "v3" },
   },
 
   // ── pools.trade (Uniswap's UERC20Factory — "built by Uniswap for RH Chain") ──

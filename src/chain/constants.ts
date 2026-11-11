@@ -59,8 +59,15 @@ export const HOODFUN_LAUNCHPAD = "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c"; /
 
 /** Every launchpad/factory address we know — protocol custody, never a
  *  stakeholder. One list so the scanner and read-path exclusions agree. */
-export const LAUNCHPAD_ADDRS = () => [HOODFUN_LAUNCHPAD, FLAP_PORTAL, PONS_V1_FACTORY, PONS_V2_FACTORY, BAGS_FACTORY, NOXA_FACTORY, UERC20_FACTORY];
+export const LAUNCHPAD_ADDRS = () => [HOODFUN_LAUNCHPAD, FLAP_PORTAL, PONS_V1_FACTORY, PONS_V2_FACTORY, BAGS_FACTORY, BAGS_FACTORY_V2, NOXA_FACTORY, UERC20_FACTORY, V3LAUNCH_FACTORY, TRADERBOOK_PAD];
 export const BAGS_FACTORY = "0xe8cc4431adf8b5a847c113ef0c6af9043219cb37"; // ERC1967Proxy → impl "BagsFactory" 0x7dfa0131…
+// Bags' second factory (VERSION() "3.0.0", same owner; live since block 54,594,936): its own hook, vault and curve beacon,
+// curves quoted in WETH or a stock token. Its TokenCreated differs from the first factory's (quote token, fees, threshold).
+export const BAGS_FACTORY_V2 = "0xc4210279fb1e1de24a87d6f5cc597c9422aef899";
+// "V3LaunchFactory" (verified, 2026-11-05): a launch straight into a locked 1% v3 WETH pool, like Pons v1.
+export const V3LAUNCH_FACTORY = "0x7566ff93d5a9298b6b899618c2cf85c33e88d1b9";
+// "TraderBookPadV2" (verified, public 2026-11-07): a curve per "Book" token held by the pad, bonded into a time-locked v3/v4 pool.
+export const TRADERBOOK_PAD = "0xea44025c4900e6cd14c830d4983454fe3101536c";
 export const UERC20_FACTORY = "0x000000e200088d55c39a11f609e5f667729ad49b"; // verified "UERC20Factory" — Uniswap's token factory that pools.trade ("built by Uniswap for Robinhood Chain") fronts; graduates to Uniswap v4
 
 // v4 hooks that mark a graduation pool as belonging to a launchpad (official
@@ -111,7 +118,7 @@ export const INFRA_WALLETS = new Set(
     WETH, USDG, NATIVE_ETH,
     SWAP_ROUTER_V3, QUOTER_V2, UNIVERSAL_ROUTER, V2_ROUTER, PERMIT2,
     UNIV4_POOL_MANAGER, UERC20_FACTORY,
-    PONS_V1_FACTORY, PONS_V2_FACTORY, NOXA_FACTORY, FLAP_PORTAL, HOODFUN_LAUNCHPAD, BAGS_FACTORY,
+    PONS_V1_FACTORY, PONS_V2_FACTORY, NOXA_FACTORY, FLAP_PORTAL, HOODFUN_LAUNCHPAD, BAGS_FACTORY, BAGS_FACTORY_V2, V3LAUNCH_FACTORY, TRADERBOOK_PAD,
     // The v4 hooks themselves hold tokens: the Pons v2 hook takes a 2–4% swap
     // fee in-kind and sweeps it, which on a token page's tape looked like the
     // hook selling 49,740 ETERNAL (observed 2026-09-14). It is the fee, not a

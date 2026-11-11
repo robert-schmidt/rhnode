@@ -70,7 +70,8 @@ export async function official(t: string[]): Promise<Map<string, string>> {
     `SELECT DISTINCT tk, pool, toString(created_block) AS created_block FROM pools ARRAY JOIN [token0, token1] AS tk WHERE hooks = '${PONS_V2_MEME_HOOK}'
      AND tk IN {t:Array(String)} AND (token0 IN {t:Array(String)} OR token1 IN {t:Array(String)})`, { t: grad }))
     if (g.created_block === M.get(g.tk)?.block && !G.has(g.tk)) G.set(g.tk, g.pool);
-  return new Map([...L.values()].map((l) => [l.token,
+  // Bags' second factory names no pool we trust at launch: such a token's market comes from its trades, like any token's.
+  return new Map([...L.values()].filter((l) => l.source !== "bags" || field(l.detail, "poolId")).map((l) => [l.token,
     l.source === "pons-v2" ? (M.has(l.token) ? G.get(l.token) ?? "" : field(l.detail, "curve"))
       : l.source === "bags" ? field(l.detail, "poolId") : field(M.get(l.token)?.detail, "pool")]));
 }
