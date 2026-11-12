@@ -5,7 +5,7 @@
 // (A sign -1 trade with keep 0 is a duplicate's correction, src/tools/dedupe-trades.ts: it never reaches kept_trades.)
 // Its ERC-20 transfers need nothing: kept_transfers holds all of them. Logs and receipts of older txs come from the node.
 // ponytail: history below the oldest raw block needs full blocks from our node; add that scan once Nitro is synced.
-import { ch, rows } from "../ch.ts";
+import { ch, command, rows, workload } from "../ch.ts";
 import { KEEP } from "../ingest/keep.ts";
 
 const MAX_DAY = Number(process.env.WALLET_MAX_TXS_DAY ?? 10_000); // ~420 B a kept tx: ≤4 MB a day each (2026-10-30)
@@ -15,7 +15,7 @@ const TOUCH = "(`from` = {w:String} OR `to` = {w:String} OR created = {w:String}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type State = { wallet: string; status: string; floor: number; txs: number; note: string };
-const save = (s: State[]) => ch.insert({ table: "ctl_wallet_index", values: s.map((x) => ({ ...x, version: Date.now() })), format: "JSONEachRow" });
+const save = async (s: State[]) => void (s.length && await ch.insert({ table: "ctl_wallet_index", values: s.map((x) => ({ ...x, version: Date.now() })), format: "JSONEachRow" }));
 
 /** Index a batch: decide each, watch the kept ones, wait for ingest to pick them up, then backfill from raw. */
 export async function indexWallets(ws: string[]): Promise<State[]> {
@@ -35,16 +35,24 @@ export async function indexWallets(ws: string[]): Promise<State[]> {
   if (keep.length) {
     await ch.insert({ table: "ctl_watchlists", values: keep.map((x) => ({ list: "requested", kind: "wallet", value: x.wallet, keep_bits: KEEP.WATCH_WALLET, version: Date.now() })), format: "JSONEachRow" });
     await sleep(RELOAD_MS); // from here on ingest keeps them; the copy below covers everything older (kept_* dedupes the overlap)
-    for (const { wallet } of keep) {
-      await ch.command({ query: `INSERT INTO kept_txs SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM raw_txs WHERE ${TOUCH}`, query_params: { w: wallet } });
-      await ch.command({ query: `INSERT INTO kept_trades SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM ev_trades WHERE wallet = {w:String} AND NOT (sign = -1 AND keep = 0)`, query_params: { w: wallet } });
+    for (const x of keep) {
+      const w = x.wallet;
+      // A busy wallet's txs touch most of raw_txs' granules: the copy reads ~50M rows (~100 s under load, 2026-11-12). At the
+      // default client's 60 s it timed out, the batch's states were never saved, and the whole batch was copied again
+      // (one wallet 13 times in an hour). Now the slow lane (600 s) and each wallet's state saved as soon as it's copied.
+      await command(`INSERT INTO kept_txs SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM raw_txs WHERE ${TOUCH}`, { w });
+      await command(`INSERT INTO kept_trades SELECT * REPLACE (bitOr(keep, ${KEEP.WATCH_WALLET}) AS keep) FROM ev_trades WHERE wallet = {w:String} AND NOT (sign = -1 AND keep = 0)`, { w });
+      await save([x]);
     }
   }
-  await save(out);
+  await save(out.filter((x) => x.status !== "indexed"));
   return out;
 }
 
-export async function walletWorker(): Promise<never> {
+export function walletWorker(): Promise<never> {
+  return workload.run("bulk/slow", walletLoop);
+}
+async function walletLoop(): Promise<never> {
   for (;;) {
     try {
       const q = await rows<{ wallet: string }>(`SELECT wallet FROM ctl_wallet_index FINAL WHERE status = 'queued' ORDER BY requested_at LIMIT ${BATCH}`);

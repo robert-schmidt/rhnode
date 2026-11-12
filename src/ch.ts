@@ -58,6 +58,12 @@ export async function rows<T>(query: string, query_params?: Record<string, unkno
   return (await client(w).query({ query, query_params, format: "JSONEachRow", clickhouse_settings: wl(w) })).json<T>();
 }
 
+/** A statement with no result (INSERT … SELECT), in the caller's workload and lane like rows(). */
+export async function command(query: string, query_params?: Record<string, unknown>): Promise<void> {
+  const w = workload.getStore();
+  await client(w).command({ query, query_params, clickhouse_settings: wl(w) });
+}
+
 /** The time span {t0, t1} of blocks (from, to], for `inSpan()`: raw/ev tables are partitioned by day on `time` and sorted by
  *  token or pool, so a block range alone reads nearly every granule; with the time bound each part's min/max skips it.
  *  Unknown blocks give no bound. Memoized for the last range (one lookup per projector tick). */
