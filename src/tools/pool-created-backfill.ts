@@ -15,7 +15,14 @@ const hex = (n: number) => "0x" + n.toString(16);
 const MAX_AGE_S = 5, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type Log = { address: string; topics: string[]; data: string; blockNumber: string; blockTimestamp?: string };
+/** Waits out a Nitro restart (the heal timer restarts it every few hours; ~2 min): retries a failed call for up to 30 min. */
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
+  for (let i = 0; ; i++) {
+    try { return await rpc1<T>(method, params); }
+    catch (e) { if (i >= 60) throw e; console.log(`${method}: ${(e as Error).message}; retry in 30 s`); await sleep(30_000); }
+  }
+}
+async function rpc1<T>(method: string, params: unknown[]): Promise<T> {
   const r = await fetch(node!, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: AbortSignal.timeout(600_000) });
   const j = (await r.json()) as { result?: T; error?: { message: string } };
