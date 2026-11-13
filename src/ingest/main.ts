@@ -37,7 +37,7 @@ async function fetchBlock(up: Client, n: number): Promise<[RpcBlock, RpcReceipt[
 export class Reorg extends Error {}
 
 type Fetched = [RpcBlock, RpcReceipt[]][];
-const fetchRange = (up: Client, from: number, to: number): Promise<Fetched> =>
+export const fetchRange = (up: Client, from: number, to: number): Promise<Fetched> =>
   Promise.all(Array.from({ length: to - from + 1 }, (_, i) => fetchBlock(up, from + i)));
 
 /** `pre`: the batch's blocks already being fetched (the tip loop reads ahead while it is behind). */
