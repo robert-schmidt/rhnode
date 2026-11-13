@@ -319,7 +319,9 @@ export async function choosePools(choose: string[], cv: [{ token: string; pool: 
   return [...best.values()];
 }
 
-async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
+/** light: only what marks a position (decimals, supply, the main pool's price and liquidity), the same main-pool choice and
+ *  price as a full card: no holders/top10, trade windows, top wallet or launch fields. */
+async function build(up: Up, tokens: string[], light = false): Promise<Map<string, Card>> {
   const t = tokens, now = Date.now();
   if (picked.size > 10_000) picked.clear();
   if (holds.size > 10_000) holds.clear();
@@ -337,15 +339,16 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
       rows<{ token: string; pool: string; v: number }>(
         "SELECT token, pool, sum(volume_usd) AS v FROM agg_candles_1m WHERE token IN {t:Array(String)} GROUP BY token, pool", { t: choose }),
       official(choose).then((m) => [...m].map(([token, op]) => ({ token, op })))]),
-    rows<{ token: string } & Record<string, string>>(
+    light ? [] : rows<{ token: string } & Record<string, string>>(
       `SELECT token, ${WINDOWS.map(([h, i]) => `sumIf(sign, side = 'buy' AND time >= now() - ${i}) AS buys${h}, sumIf(sign, side = 'sell' AND time >= now() - ${i}) AS sells${h},
          uniqExactIf(wallet, side = 'buy' AND sign = 1 AND time >= now() - ${i}) AS buyers${h}, uniqExactIf(wallet, side = 'sell' AND sign = 1 AND time >= now() - ${i}) AS sellers${h}`).join(", ")}
        FROM ev_trades WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token`, { t }),
-    rows<{ token: string; pool: string } & Record<string, number>>(`SELECT token, pool, nv AS v24, rv AS raw24, nv6 AS v6, rv6 AS raw6, nv1 AS v1, rv1 AS raw1
-      FROM (${NET24})`, { t }),
+    // light: NET24 only ranks the pools still to choose (choosePools reads no other token's)
+    light && !choose.length ? [] : rows<{ token: string; pool: string } & Record<string, number>>(`SELECT token, pool, nv AS v24, rv AS raw24, nv6 AS v6, rv6 AS raw6, nv1 AS v1, rv1 AS raw1
+      FROM (${NET24})`, { t: light ? choose : t }),
     eth(),
     rows<{ b: string; pb: string }>("SELECT maxIf(block, name = 'tip') AS b, maxIf(block, name = 'projector') AS pb FROM ctl_cursors FINAL WHERE name IN ('tip', 'projector')"),
-    rows<{ token: string; wallet: string; share: number }>(
+    light ? [] : rows<{ token: string; wallet: string; share: number }>(
       `SELECT token, argMax(wallet, w) AS wallet, max(w) / sum(w) AS share FROM (SELECT token, wallet, sum(usd * sign) AS w FROM ev_trades
        WHERE token IN {t:Array(String)} AND time >= now() - INTERVAL 1 DAY GROUP BY token, wallet) GROUP BY token HAVING sum(w) > 0`, { t }),
   ]);
@@ -369,8 +372,8 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
 
   // Holdings that aren't circulating, and top10 without protocol addresses (only for tokens whose history is complete)
   const old = (tk: string) => !(now / 1000 - (L.get(tk)?.time ?? 0) < YOUNG_S);
-  const full = t.filter((tk) => M.get(tk)?.complete && !(now - (holds.get(tk)?.at ?? 0) < PICK_MS));
-  const kept = t.filter((tk) => M.get(tk)?.complete && !full.includes(tk));
+  const full = light ? [] : t.filter((tk) => M.get(tk)?.complete && !(now - (holds.get(tk)?.at ?? 0) < PICK_MS));
+  const kept = light ? [] : t.filter((tk) => M.get(tk)?.complete && !full.includes(tk));
   const special = [DEAD, ...LOCKERS, ...LAUNCHPADS, ...curves];
   // the tokens' own pools and hooks are left out in the query: a quote token like WETH has thousands, and query
   // parameters travel in the URL (a cold batch with WETH in it failed "URI too long")
@@ -423,11 +426,12 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
         price: ms?.price ?? null, price_usd: ms?.price != null && qUsd != null ? ms.price * qUsd : null,
         liquidity_usd: ms?.liquidityUsd ?? null, liquidity_quote_usd: ms?.quoteUsd ?? null, liquidity_kind: ms?.kind ?? null,
         ...(p.venue === "v3" ? { liquidity_balances_usd: ms?.balancesUsd ?? null } : {}),
-        volume_24h_usd: r2(VP.get(tk)?.v24), volume_24h_raw_usd: r2(VP.get(tk)?.raw24),
+        ...(light ? {} : { volume_24h_usd: r2(VP.get(tk)?.v24), volume_24h_raw_usd: r2(VP.get(tk)?.raw24) }),
       };
     }
     const lc = L.get(tk), tr = T.get(tk), pu = (main?.price_usd as number | null) ?? null;
     const usdOf = (raw: bigint) => (pu == null || dec == null ? null : Math.round(Number(raw) / 10 ** dec * pu * 100) / 100);
+    if (light) { out.set(tk, { token: tk, decimals: dec, total_supply: m.supply, fdv_usd: usdOf(supply), main_pool: main, block: ingested, price_block: projected }); continue; }
     out.set(tk, {
       token: tk, name: m.name, symbol: m.symbol, decimals: dec, total_supply: m.supply, complete,
       circulating_supply: complete ? (supply - burned - locked - pad).toString() : null,
@@ -456,7 +460,7 @@ async function build(up: Up, tokens: string[]): Promise<Map<string, Card>> {
     return m != null && (m.price_usd == null || ((m.liquidity_quote_usd as number | null) ?? 0) < DRY); });
   if (dry.length) {
     for (const k of dry) picked.delete(k);
-    for (const [k, c] of await build(up, dry)) out.set(k, c);
+    for (const [k, c] of await build(up, dry, light)) out.set(k, c);
   }
   return out;
 }
@@ -477,4 +481,19 @@ export async function cards(up: Up, tokens: string[]): Promise<Map<string, Card 
     }
   }
   return new Map(await Promise.all(tokens.map(async (k) => [k, await memo.get(k)!.p] as const)));
+}
+
+const LIGHT = ["token", "decimals", "total_supply", "fdv_usd", "main_pool", "block", "price_block"];
+/** Light cards (build's `light`): a full card still in the memo answers in its light shape, so a token marks the same
+ *  whichever read answered; the rest are built light and not memoized (they'd pass for full cards). */
+export async function lightCards(up: Up, tokens: string[]): Promise<Map<string, Card | null>> {
+  const F = new Map(tokens.flatMap((k) => { const m = memo.get(k); return m && Date.now() - m.at < 60_000 ? [[k, m.p] as const] : []; }));
+  const need = tokens.filter((k) => !F.has(k));
+  const built = need.length ? await build(up, need, true) : new Map<string, Card>();
+  return new Map(await Promise.all(tokens.map(async (k) => {
+    const f = F.get(k), c = f ? await f.catch(() => null) : built.get(k) ?? null;
+    if (!c || !f) return [k, c] as const;
+    const { volume_24h_usd: _v, volume_24h_raw_usd: _r, ...main } = (c.main_pool ?? {}) as Card;
+    return [k, Object.fromEntries(LIGHT.map((f) => [f, f === "main_pool" ? (c.main_pool ? main : null) : c[f]]))] as const;
+  })));
 }
