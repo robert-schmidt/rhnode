@@ -16,6 +16,7 @@ import { history, walkFloor } from "./history.ts";
 import { walletWorker } from "./wallets.ts";
 import { labelWorker } from "../labels.ts";
 import { discoveryWorker } from "../discovery.ts";
+import { gapWorker } from "../ingest/refill.ts";
 
 /** Above this many transfers a token stays refused (WETH, USDG, stables): too big to hold for the gain. */
 const MAX_TRANSFERS = Number(process.env.PROMOTE_MAX_TRANSFERS ?? 500_000);
@@ -131,6 +132,7 @@ if (import.meta.main) await workload.run("bulk", async () => {
   void walletWorker(); // requested wallets (src/watch.ts) are indexed alongside the history pass and token promotion
   void labelWorker(up); // exchanges, bridges, solvers among the hubs and requested wallets (src/labels.ts)
   void discoveryWorker(up); // creations and token origins (src/discovery.ts)
+  void workload.run("bulk/slow", () => gapWorker(up)); // ingest gaps a power cut left (src/ingest/refill.ts), refilled and data_rev bumped
   // The history pass holds every token's history above its floor, so promotions wait for it, and afterwards fetch
   // only below it.
   if (process.env.HISTORY === "1") await history(up, B0);
